@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 
 from .config import (
     DLQ_QUEUE_NAME,
+    DLQ_MAX_ITEMS,
+    DLQ_PRUNE_INTERVAL_SECONDS,
     DLQ_REPLAY_BATCH_SIZE,
     DLQ_REPLAY_DRY_RUN,
     DLQ_REPLAY_INTERVAL_SECONDS,
@@ -61,6 +63,7 @@ celery_app.conf.update(
         "email_worker": {"queue": queue_name("email")},
         "escalation_worker": {"queue": queue_name("escalation")},
         "replay_dlq": {"queue": queue_name(DLQ_QUEUE_NAME)},
+        "prune_dlq": {"queue": queue_name(DLQ_QUEUE_NAME)},
     },
     beat_schedule={
         "queue-metrics-snapshot": {
@@ -70,6 +73,10 @@ celery_app.conf.update(
         "dlq-replay": {
             "task": "replay_dlq",
             "schedule": DLQ_REPLAY_INTERVAL_SECONDS,
+        },
+        "dlq-prune": {
+            "task": "prune_dlq",
+            "schedule": DLQ_PRUNE_INTERVAL_SECONDS,
         },
     },
 )
@@ -112,6 +119,22 @@ def _increment_metric_counter(prefix: str, channel: str, amount: int = 1) -> Non
 
 def _refresh_dlq_metric() -> None:
     _touch_metrics({"dlq_size": redis_conn.llen(DLQ_REDIS_KEY)})
+
+
+def _bound_dlq_max_items(max_items: int | None = None) -> int:
+    requested = DLQ_MAX_ITEMS if max_items is None else int(max_items)
+    return max(1, requested)
+
+
+def _trim_dlq_to_limit(max_items: int | None = None) -> int:
+    limit = _bound_dlq_max_items(max_items)
+    current_size = redis_conn.llen(DLQ_REDIS_KEY)
+    if current_size <= limit:
+        return 0
+
+    redis_conn.ltrim(DLQ_REDIS_KEY, -limit, -1)
+    _refresh_dlq_metric()
+    return current_size - limit
 
 
 def _snapshot_queue_backlog() -> dict[str, int | str]:
@@ -214,6 +237,7 @@ def _dlq_payload(
 def _push_dlq_entry(task_name: str, args: tuple, kwargs: dict, exception: Exception | str) -> dict:
     payload = _dlq_payload(task_name, args, kwargs, exception)
     redis_conn.rpush(DLQ_REDIS_KEY, json.dumps(payload, sort_keys=True))
+    _trim_dlq_to_limit()
     _refresh_dlq_metric()
     return payload
 
@@ -601,3 +625,18 @@ def replay_dlq(limit: int | None = None):
 @celery_app.task(name="queue_metrics_snapshot")
 def queue_metrics_snapshot():
     return _snapshot_queue_backlog()
+
+
+@celery_app.task(name="prune_dlq")
+def prune_dlq(max_items: int | None = None):
+    limit = _bound_dlq_max_items(max_items)
+    current_size = redis_conn.llen(DLQ_REDIS_KEY)
+    if current_size <= limit:
+        _refresh_dlq_metric()
+        return {"removed": 0, "remaining": current_size, "max_items": limit}
+
+    removed = current_size - limit
+    redis_conn.ltrim(DLQ_REDIS_KEY, -limit, -1)
+    remaining = redis_conn.llen(DLQ_REDIS_KEY)
+    _refresh_dlq_metric()
+    return {"removed": removed, "remaining": remaining, "max_items": limit}

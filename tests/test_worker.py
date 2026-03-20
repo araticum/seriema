@@ -13,12 +13,19 @@ if str(PARENT) not in sys.path:
     sys.path.insert(0, str(PARENT))
 
 
-def _fresh_worker(monkeypatch, *, prefix: str, dry_run: str = "true"):
+def _fresh_worker(
+    monkeypatch,
+    *,
+    prefix: str,
+    dry_run: str = "true",
+    dlq_max_items: str = "1000",
+):
     monkeypatch.setenv("SERIEMA_REDIS_KEY_PREFIX", prefix)
     monkeypatch.setenv("SERIEMA_QUEUE_PREFIX", f"queue:{prefix}")
     monkeypatch.setenv("SERIEMA_DLQ_QUEUE_NAME", "dlq")
     monkeypatch.setenv("SERIEMA_DLQ_REPLAY_DRY_RUN", dry_run)
     monkeypatch.setenv("SERIEMA_DLQ_REPLAY_BATCH_SIZE", "10")
+    monkeypatch.setenv("SERIEMA_DLQ_MAX_ITEMS", dlq_max_items)
     monkeypatch.setenv("SERIEMA_OPS_MAX_LIMIT", "100")
     monkeypatch.setenv("SERIEMA_METRICS_KEY", "metrics:ops")
     monkeypatch.setenv("SERIEMA_METRICS_TTL_SECONDS", "120")
@@ -119,3 +126,45 @@ def test_replay_dlq_ignores_invalid_entry_without_breaking(monkeypatch):
     assert after == 1
     assert result["replayed"] == 0
     assert result["remaining"] == 1
+
+
+def test_dlq_truncates_and_prunes_to_max_items(monkeypatch):
+    prefix = f"pytest:{uuid.uuid4().hex}"
+    _, redis_client, worker = _fresh_worker(
+        monkeypatch,
+        prefix=prefix,
+        dry_run="true",
+        dlq_max_items="2",
+    )
+
+    _clear_prefix(redis_client.redis_conn, prefix)
+
+    for idx in range(3):
+        payload = {
+            "task_name": "voice_worker",
+            "args": [f"notification-{idx}", f"trace-{idx}"],
+            "kwargs": {},
+            "trace_id": f"trace-{idx}",
+            "notification_id": f"notification-{idx}",
+            "incident_id": f"incident-{idx}",
+            "error": f"boom-{idx}",
+            "failed_at": f"fixed-{idx}",
+        }
+        redis_client.redis_conn.rpush(worker.DLQ_REDIS_KEY, json.dumps(payload))
+        worker._trim_dlq_to_limit()
+
+    assert redis_client.redis_conn.llen(worker.DLQ_REDIS_KEY) == 2
+    entries = [
+        json.loads(item)
+        for item in redis_client.redis_conn.lrange(worker.DLQ_REDIS_KEY, 0, -1)
+    ]
+    assert [entry["notification_id"] for entry in entries] == [
+        "notification-1",
+        "notification-2",
+    ]
+
+    result = worker.prune_dlq(max_items=1)
+    assert result["removed"] == 1
+    assert result["remaining"] == 1
+    assert result["max_items"] == 1
+    assert redis_client.redis_conn.llen(worker.DLQ_REDIS_KEY) == 1

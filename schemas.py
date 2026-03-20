@@ -120,6 +120,19 @@ class QueueMetricsResponse(BaseModel):
     escalation: int
     dlq: int
 
+class DependencyStatusDetail(BaseModel):
+    status: str
+    detail: Optional[str] = None
+
+class HealthDepsResponse(BaseModel):
+    postgres: DependencyStatusDetail
+    redis: DependencyStatusDetail
+    overall: str
+
+class OpsMetricsResponse(BaseModel):
+    redis_key: str
+    metrics: Dict[str, Any]
+
 class DLQPreviewItem(BaseModel):
     task_name: str
     trace_id: Optional[str] = None

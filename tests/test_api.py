@@ -33,11 +33,19 @@ class FakeQuery:
 class FakeSession:
     def __init__(self, queries):
         self._queries = list(queries)
+        self.executed = []
 
     def query(self, *args, **kwargs):
         if not self._queries:
             raise AssertionError("Unexpected query call")
         return FakeQuery(self._queries.pop(0))
+
+    def execute(self, statement):
+        self.executed.append(statement)
+        class _ScalarResult:
+            def scalar(self_inner):
+                return 1
+        return _ScalarResult()
 
     def add(self, *args, **kwargs):
         return None
@@ -56,6 +64,7 @@ class FakeSession:
 class FakeRedis:
     lengths: dict
     dlq_entries: list[bytes]
+    hashes: dict | None = None
 
     def llen(self, key):
         return self.lengths.get(key, len(self.dlq_entries) if key.endswith(":dlq") else 0)
@@ -89,6 +98,12 @@ class FakeRedis:
     def delete(self, *args, **kwargs):
         self.dlq_entries.clear()
         return None
+
+    def ping(self):
+        return True
+
+    def hgetall(self, key):
+        return self.hashes.get(key, {}) if self.hashes is not None else {}
 
 
 class FakeAsyncResult:
@@ -124,6 +139,42 @@ def test_health(client):
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_health_deps_ok(client, monkeypatch):
+    fake_session = FakeSession(queries=[])
+    fake_redis = FakeRedis(lengths={}, dlq_entries=[])
+    main.app.dependency_overrides[main.get_db] = lambda: fake_session
+    monkeypatch.setattr(main, "redis_conn", fake_redis)
+
+    response = client.get("/health/deps")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["postgres"]["status"] == "ok"
+    assert payload["redis"]["status"] == "ok"
+    assert payload["overall"] == "ok"
+
+
+def test_health_deps_down(client, monkeypatch):
+    class BrokenSession(FakeSession):
+        def execute(self, statement):
+            raise RuntimeError("postgres unavailable")
+
+    class BrokenRedis(FakeRedis):
+        def ping(self):
+            raise RuntimeError("redis unavailable")
+
+    main.app.dependency_overrides[main.get_db] = lambda: BrokenSession(queries=[])
+    monkeypatch.setattr(main, "redis_conn", BrokenRedis(lengths={}, dlq_entries=[]))
+
+    response = client.get("/health/deps")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["postgres"]["status"] == "down"
+    assert payload["redis"]["status"] == "down"
+    assert payload["overall"] == "down"
 
 
 def test_metrics_sla_valid(client):
@@ -185,6 +236,34 @@ def test_metrics_queues(client, monkeypatch):
     }
 
 
+def test_metrics_ops(client, monkeypatch):
+    fake_redis = FakeRedis(
+        lengths={},
+        dlq_entries=[],
+        hashes={
+            main.prefixed_redis_key(main.METRICS_KEY): {
+                b"tasks_sent_by_channel:voice": b"3",
+                b"tasks_failed_by_channel:email": b"2",
+                b"dlq_size": b"4",
+                b"updated_at": b"2026-03-20T10:00:00+00:00",
+                b"note": b"hello",
+            }
+        },
+    )
+    monkeypatch.setattr(main, "redis_conn", fake_redis)
+
+    response = client.get("/metrics/ops")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["redis_key"] == main.prefixed_redis_key(main.METRICS_KEY)
+    assert payload["metrics"]["tasks_sent_by_channel:voice"] == 3
+    assert payload["metrics"]["tasks_failed_by_channel:email"] == 2
+    assert payload["metrics"]["dlq_size"] == 4
+    assert payload["metrics"]["updated_at"] == "2026-03-20T10:00:00+00:00"
+    assert payload["metrics"]["note"] == "hello"
+
+
 def test_ops_dlq_preview_and_replay_auth_and_limit(client, monkeypatch):
     monkeypatch.setenv("SERIEMA_ADMIN_TOKEN", "admin-secret")
     fake_redis = FakeRedis(
@@ -218,4 +297,3 @@ def test_ops_dlq_preview_and_replay_auth_and_limit(client, monkeypatch):
     replay_payload = replay.json()
     assert replay_payload["status"] == "completed"
     assert replay_payload["result"]["replayed"] == 1
-

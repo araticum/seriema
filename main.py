@@ -4,11 +4,12 @@ import hashlib
 import hmac
 import os
 import time
+import re
 from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI, Depends, HTTPException, Request, Response, Query, Header
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import func
+from sqlalchemy import func, text
 from . import models, schemas
 from .database import get_db
 from .redis_client import is_duplicate, redis_conn
@@ -17,6 +18,7 @@ from .worker import dispatch_incident, replay_dlq, celery_app
 from .config import (
     APP_BASE_URL,
     DLQ_QUEUE_NAME,
+    METRICS_KEY,
     OPS_ENDPOINT_MAX_LIMIT,
     VOICE_WEBHOOK_MAX_SKEW_SECONDS,
     queue_name,
@@ -68,6 +70,22 @@ def _get_or_create_trace_id(db: Session, incident_id: uuid.UUID) -> str:
 
 def _queue_length(queue_key: str) -> int:
     return int(redis_conn.llen(queue_key) or 0)
+
+def _metric_value_from_redis(value):
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value):
+        try:
+            return int(value)
+        except ValueError:
+            return value
+    return value
+
+def _dependency_status(ok: bool, detail: str | None = None) -> schemas.DependencyStatusDetail:
+    return schemas.DependencyStatusDetail(
+        status="ok" if ok else "down",
+        detail=detail,
+    )
 
 def _require_admin_token(x_admin_token: str | None) -> None:
     configured_token = os.environ.get("SERIEMA_ADMIN_TOKEN")
@@ -154,6 +172,30 @@ def _verify_voice_webhook_signature(
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
+@app.get("/health/deps", response_model=schemas.HealthDepsResponse)
+def health_dependencies(db: Session = Depends(get_db)):
+    postgres_status = _dependency_status(False)
+    redis_status = _dependency_status(False)
+
+    try:
+        db.execute(text("SELECT 1"))
+        postgres_status = _dependency_status(True)
+    except Exception as exc:
+        postgres_status = _dependency_status(False, str(exc))
+
+    try:
+        redis_conn.ping()
+        redis_status = _dependency_status(True)
+    except Exception as exc:
+        redis_status = _dependency_status(False, str(exc))
+
+    overall_ok = postgres_status.status == "ok" and redis_status.status == "ok"
+    return schemas.HealthDepsResponse(
+        postgres=postgres_status,
+        redis=redis_status,
+        overall="ok" if overall_ok else "down",
+    )
 
 @app.post("/events/incoming", response_model=schemas.EventIngestResponse)
 def ingest_event(event: schemas.EventIncoming, db: Session = Depends(get_db)):
@@ -422,6 +464,18 @@ def get_queue_metrics():
         email=_queue_length(queue_name("email")),
         escalation=_queue_length(queue_name("escalation")),
         dlq=_queue_length(prefixed_redis_key(DLQ_QUEUE_NAME)),
+    )
+
+@app.get("/metrics/ops", response_model=schemas.OpsMetricsResponse)
+def get_ops_metrics():
+    raw_metrics = redis_conn.hgetall(prefixed_redis_key(METRICS_KEY))
+    parsed_metrics = {
+        str(key.decode("utf-8") if isinstance(key, bytes) else key): _metric_value_from_redis(value)
+        for key, value in raw_metrics.items()
+    }
+    return schemas.OpsMetricsResponse(
+        redis_key=prefixed_redis_key(METRICS_KEY),
+        metrics=parsed_metrics,
     )
 
 @app.get("/ops/dlq/preview", response_model=schemas.DLQPreviewResponse)
