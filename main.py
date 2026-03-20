@@ -483,7 +483,9 @@ def ingest_event(event: schemas.EventIncoming, db: Session = Depends(get_db)):
 
 @app.post("/rules", response_model=schemas.RuleResponse)
 def create_rule(rule: schemas.RuleCreate, db: Session = Depends(get_db)):
-    db_rule = models.Rule(**rule.dict())
+    db_rule = models.Rule(**rule.model_dump())
+    if db_rule.id is None:
+        db_rule.id = uuid.uuid4()
     db.add(db_rule)
     db.commit()
     db.refresh(db_rule)

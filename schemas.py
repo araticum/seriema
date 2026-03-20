@@ -1,8 +1,34 @@
 from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic import field_validator
 from typing import List, Optional, Dict, Any, Literal
 import uuid
 from .models import IncidentStatus, NotificationStatus, NotificationChannel, AuditAction
+
+
+def _validate_fallback_policy_json_value(value: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if value is None:
+        return value
+    if not isinstance(value, dict):
+        raise ValueError("fallback_policy_json must be an object")
+
+    missing_keys = [key for key in ("escalation_group_id", "channels") if key not in value]
+    if missing_keys:
+        raise ValueError("fallback_policy_json must include escalation_group_id and channels")
+
+    escalation_group_id = value.get("escalation_group_id")
+    try:
+        uuid.UUID(str(escalation_group_id))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("fallback_policy_json.escalation_group_id must be a valid UUID") from exc
+
+    channels = value.get("channels")
+    if not isinstance(channels, list) or not channels:
+        raise ValueError("fallback_policy_json.channels must be a non-empty list of strings")
+    if not all(isinstance(channel, str) for channel in channels):
+        raise ValueError("fallback_policy_json.channels must be a non-empty list of strings")
+
+    return value
 
 class EventIncoming(BaseModel):
     source: str
@@ -49,6 +75,11 @@ class RuleCreate(BaseModel):
     ack_deadline: Optional[int] = None
     fallback_policy_json: Optional[Dict[str, Any]] = None
 
+    @field_validator("fallback_policy_json")
+    @classmethod
+    def validate_fallback_policy_json(cls, value):
+        return _validate_fallback_policy_json_value(value)
+
 class RuleResponse(RuleCreate):
     id: uuid.UUID
 
@@ -70,6 +101,11 @@ class RuleUpdate(BaseModel):
     requires_ack: Optional[bool] = None
     ack_deadline: Optional[int] = None
     fallback_policy_json: Optional[Dict[str, Any]] = None
+
+    @field_validator("fallback_policy_json")
+    @classmethod
+    def validate_fallback_policy_json(cls, value):
+        return _validate_fallback_policy_json_value(value)
 
 class RuleListResponse(BaseModel):
     total: int

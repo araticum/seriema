@@ -1180,6 +1180,36 @@ def test_list_rules_limit_above_max(client):
     assert response.status_code == 400
 
 
+def test_create_rule_with_valid_fallback_policy(client):
+    fake_session = FakeSession(queries=[])
+    main.app.dependency_overrides[main.get_db] = lambda: fake_session
+    try:
+        response = client.post(
+            "/rules",
+            json={
+                "rule_name": "rule-create",
+                "condition_json": {"source": "prometheus"},
+                "recipient_group_id": "00000000-0000-0000-0000-00000000aa01",
+                "channels": ["voice"],
+                "active": True,
+                "priority": 25,
+                "requires_ack": False,
+                "ack_deadline": None,
+                "fallback_policy_json": {
+                    "escalation_group_id": "00000000-0000-0000-0000-00000000aa02",
+                    "channels": ["telegram", "email"],
+                },
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["rule_name"] == "rule-create"
+        assert payload["fallback_policy_json"]["escalation_group_id"] == "00000000-0000-0000-0000-00000000aa02"
+        assert payload["fallback_policy_json"]["channels"] == ["telegram", "email"]
+    finally:
+        main.app.dependency_overrides.pop(main.get_db, None)
+
+
 def test_update_rule_and_toggle(client):
     group_a = GroupFixture(id="00000000-0000-0000-0000-00000000c001", name="group-c")
     group_b = GroupFixture(id="00000000-0000-0000-0000-00000000d001", name="group-d")
@@ -1208,6 +1238,10 @@ def test_update_rule_and_toggle(client):
             "priority": 5,
             "requires_ack": True,
             "ack_deadline": 600,
+            "fallback_policy_json": {
+                "escalation_group_id": group_a.id,
+                "channels": ["voice"],
+            },
         },
     )
     assert response.status_code == 200
@@ -1219,10 +1253,112 @@ def test_update_rule_and_toggle(client):
     assert payload["priority"] == 5
     assert payload["requires_ack"] is True
     assert payload["ack_deadline"] == 600
+    assert payload["fallback_policy_json"]["escalation_group_id"] == group_a.id
+    assert payload["fallback_policy_json"]["channels"] == ["voice"]
 
     toggled = client.post(f"/rules/{rule.id}/toggle")
     assert toggled.status_code == 200
     assert toggled.json()["active"] is True
+
+
+@pytest.mark.parametrize(
+    "payload, expected_fragment",
+    [
+        (
+            {
+                "rule_name": "rule-invalid-missing",
+                "condition_json": {"source": "prometheus"},
+                "recipient_group_id": "00000000-0000-0000-0000-00000000aa11",
+                "channels": ["voice"],
+                "fallback_policy_json": {"channels": ["voice"]},
+            },
+            "fallback_policy_json must include escalation_group_id and channels",
+        ),
+        (
+            {
+                "rule_name": "rule-invalid-empty-channels",
+                "condition_json": {"source": "prometheus"},
+                "recipient_group_id": "00000000-0000-0000-0000-00000000aa12",
+                "channels": ["voice"],
+                "fallback_policy_json": {
+                    "escalation_group_id": "00000000-0000-0000-0000-00000000aa13",
+                    "channels": [],
+                },
+            },
+            "fallback_policy_json.channels must be a non-empty list of strings",
+        ),
+        (
+            {
+                "rule_name": "rule-invalid-uuid",
+                "condition_json": {"source": "prometheus"},
+                "recipient_group_id": "00000000-0000-0000-0000-00000000aa14",
+                "channels": ["voice"],
+                "fallback_policy_json": {
+                    "escalation_group_id": "not-a-uuid",
+                    "channels": ["voice"],
+                },
+            },
+            "fallback_policy_json.escalation_group_id must be a valid UUID",
+        ),
+    ],
+)
+def test_create_rule_fallback_policy_validation_errors(client, payload, expected_fragment):
+    response = client.post("/rules", json=payload)
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert any(expected_fragment in item["msg"] for item in detail)
+
+
+@pytest.mark.parametrize(
+    "payload, expected_fragment",
+    [
+        (
+            {"fallback_policy_json": {"channels": ["voice"]}},
+            "fallback_policy_json must include escalation_group_id and channels",
+        ),
+        (
+            {
+                "fallback_policy_json": {
+                    "escalation_group_id": "00000000-0000-0000-0000-00000000aa22",
+                    "channels": [],
+                }
+            },
+            "fallback_policy_json.channels must be a non-empty list of strings",
+        ),
+        (
+            {
+                "fallback_policy_json": {
+                    "escalation_group_id": "not-a-uuid",
+                    "channels": ["voice"],
+                }
+            },
+            "fallback_policy_json.escalation_group_id must be a valid UUID",
+        ),
+    ],
+)
+def test_update_rule_fallback_policy_validation_errors(client, payload, expected_fragment):
+    group = GroupFixture(id="00000000-0000-0000-0000-00000000aa20", name="group-aa20")
+    rule = RuleFixture(
+        id="00000000-0000-0000-0000-000000000221",
+        rule_name="rule",
+        condition_json={"source": "x"},
+        recipient_group_id=group.id,
+        channels=["voice"],
+        active=True,
+        priority=10,
+        requires_ack=False,
+        ack_deadline=None,
+        fallback_policy_json=None,
+    )
+    fake_session = FakeRuleSession([rule], [group])
+    main.app.dependency_overrides[main.get_db] = lambda: fake_session
+    try:
+        response = client.patch(f"/rules/{rule.id}", json=payload)
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert any(expected_fragment in item["msg"] for item in detail)
+    finally:
+        main.app.dependency_overrides.pop(main.get_db, None)
 
 
 def test_update_rule_errors(client):

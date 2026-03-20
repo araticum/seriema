@@ -835,6 +835,152 @@ def test_rate_limit_allows_first_send_and_blocks_second(monkeypatch):
     assert redis_client.redis_conn.get(worker._channel_circuit_failure_key("VOICE")) is None
 
 
+def test_handle_escalation_invalid_fallback_policy_records_failed_audit(monkeypatch):
+    prefix = f"pytest:{uuid.uuid4().hex}"
+    _, redis_client, worker = _fresh_worker(monkeypatch, prefix=prefix, dry_run="true")
+
+    _clear_prefix(redis_client.redis_conn, prefix)
+
+    from Seriema import models
+
+    db = worker.SessionLocal()
+    try:
+        group = models.Group(name=f"Fallback-{uuid.uuid4().hex}")
+        contact = models.Contact(name="Escalation Contact", email="escalation@example.com")
+        incident = models.Incident(
+            external_event_id=f"evt-{uuid.uuid4().hex}",
+            source="pytest",
+            severity="HIGH",
+            title="escalation-invalid",
+            status=worker.IncidentStatus.OPEN,
+        )
+        db.add(group)
+        db.add(contact)
+        db.add(incident)
+        db.commit()
+        db.refresh(group)
+        db.refresh(contact)
+        db.refresh(incident)
+
+        rule = models.Rule(
+            rule_name="invalid-policy",
+            condition_json={"source": "pytest"},
+            recipient_group_id=group.id,
+            channels=["VOICE"],
+            fallback_policy_json={
+                "escalation_group_id": "not-a-uuid",
+                "channels": "VOICE",
+            },
+        )
+        db.add(rule)
+        db.commit()
+        db.refresh(rule)
+
+        incident.matched_rule_id = rule.id
+        db.commit()
+    finally:
+        db.close()
+
+    result = worker._handle_escalation_impl(str(incident.id), "trace-invalid-policy")
+
+    assert result is True
+    assert incident.status == worker.IncidentStatus.ESCALATED
+
+    db = worker.SessionLocal()
+    try:
+        logs = db.query(models.AuditLog).filter(models.AuditLog.incident_id == incident.id).all()
+        assert any(log.action == models.AuditAction.ESCALATED for log in logs)
+        failed_logs = [
+            log for log in logs
+            if log.action == models.AuditAction.FAILED
+            and log.details_json.get("reason") == "invalid_fallback_policy"
+        ]
+        assert failed_logs
+        assert failed_logs[0].details_json["diagnostic"]["invalid_field"] == "escalation_group_id"
+        assert failed_logs[0].details_json["diagnostic"]["policy_type"] == "dict"
+        assert not any(log.action == models.AuditAction.FALLBACK_TASK_QUEUED for log in logs)
+    finally:
+        db.close()
+
+
+def test_handle_escalation_valid_policy_keeps_fallback_behavior(monkeypatch):
+    prefix = f"pytest:{uuid.uuid4().hex}"
+    _, redis_client, worker = _fresh_worker(monkeypatch, prefix=prefix, dry_run="true")
+
+    _clear_prefix(redis_client.redis_conn, prefix)
+
+    from Seriema import models
+
+    queued = []
+    monkeypatch.setattr(
+        worker,
+        "_queue_channel_send",
+        lambda notification_id, trace_id, channel: queued.append((notification_id, trace_id, channel)),
+    )
+
+    db = worker.SessionLocal()
+    try:
+        group = models.Group(name=f"Fallback-{uuid.uuid4().hex}")
+        contact = models.Contact(name="Escalation Contact", email="escalation@example.com")
+        incident = models.Incident(
+            external_event_id=f"evt-{uuid.uuid4().hex}",
+            source="pytest",
+            severity="HIGH",
+            title="escalation-valid",
+            status=worker.IncidentStatus.OPEN,
+        )
+        db.add(group)
+        db.add(contact)
+        db.add(incident)
+        db.commit()
+        db.refresh(group)
+        db.refresh(contact)
+        db.refresh(incident)
+
+        group_member = models.GroupMember(group_id=group.id, contact_id=contact.id)
+        db.add(group_member)
+        db.commit()
+
+        rule = models.Rule(
+            rule_name="valid-policy",
+            condition_json={"source": "pytest"},
+            recipient_group_id=group.id,
+            channels=["VOICE"],
+            fallback_policy_json={
+                "escalation_group_id": str(group.id),
+                "channels": ["VOICE"],
+            },
+        )
+        db.add(rule)
+        db.commit()
+        db.refresh(rule)
+
+        incident.matched_rule_id = rule.id
+        db.commit()
+    finally:
+        db.close()
+
+    result = worker._handle_escalation_impl(str(incident.id), "trace-valid-policy")
+
+    assert result is True
+    assert incident.status == worker.IncidentStatus.ESCALATED
+    assert len(queued) == 1
+    assert queued[0][2] == worker.NotificationChannel.VOICE
+
+    db = worker.SessionLocal()
+    try:
+        logs = db.query(models.AuditLog).filter(models.AuditLog.incident_id == incident.id).all()
+        assert any(log.action == models.AuditAction.ESCALATED for log in logs)
+        assert any(log.action == models.AuditAction.FALLBACK_TASK_QUEUED for log in logs)
+        assert not any(
+            log.action == models.AuditAction.FAILED
+            and log.details_json.get("reason") == "invalid_fallback_policy"
+            for log in logs
+        )
+    finally:
+        db.close()
+
+
 def test_stale_incident_sweeper_escalates_only_old_open_incidents(monkeypatch):
     prefix = f"pytest:{uuid.uuid4().hex}"
     _, redis_client, worker = _fresh_worker(

@@ -775,10 +775,59 @@ def _handle_escalation_impl(incident_id: str, trace_id: str):
             return True
 
         policy = rule.fallback_policy_json
-        escalation_group_id = policy.get("escalation_group_id") or policy.get("escalation_group")
-        fallback_channels = policy.get("channels", ["VOICE"])
+        invalid_field = None
+        diagnostic: dict[str, str] = {
+            "policy_type": type(policy).__name__,
+        }
 
-        if not escalation_group_id:
+        if not isinstance(policy, dict):
+            invalid_field = "policy"
+        else:
+            raw_group_id = policy.get("escalation_group_id") or policy.get("escalation_group")
+            raw_channels = policy.get("channels", ["VOICE"])
+            diagnostic["escalation_group_id_type"] = type(raw_group_id).__name__ if raw_group_id is not None else "NoneType"
+            diagnostic["channels_type"] = type(raw_channels).__name__
+
+            if isinstance(raw_group_id, uuid.UUID):
+                escalation_group_id = raw_group_id
+            elif isinstance(raw_group_id, str):
+                try:
+                    escalation_group_id = uuid.UUID(raw_group_id)
+                except (TypeError, ValueError):
+                    escalation_group_id = None
+                    invalid_field = "escalation_group_id"
+            else:
+                escalation_group_id = None
+                invalid_field = "escalation_group_id"
+
+            fallback_channels = None
+            if invalid_field is None:
+                if not isinstance(raw_channels, (list, tuple, set)):
+                    invalid_field = "channels"
+                else:
+                    fallback_channels = []
+                    for channel in raw_channels:
+                        if not isinstance(channel, str):
+                            invalid_field = "channels"
+                            break
+                        fallback_channels.append(channel)
+
+        if invalid_field is not None:
+            db.add(
+                AuditLog(
+                    trace_id=trace_id,
+                    incident_id=incident.id,
+                    action=AuditAction.FAILED,
+                    details_json={
+                        "reason": "invalid_fallback_policy",
+                        "diagnostic": {
+                            "invalid_field": invalid_field,
+                            **diagnostic,
+                        },
+                    },
+                )
+            )
+            db.commit()
             return True
 
         members = db.query(GroupMember).filter(GroupMember.group_id == escalation_group_id).all()
