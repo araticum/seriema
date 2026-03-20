@@ -65,6 +65,8 @@ ALERT_DLQ_WARN = int(os.getenv("SERIEMA_ALERT_DLQ_WARN", "10"))
 ALERT_DLQ_CRIT = int(os.getenv("SERIEMA_ALERT_DLQ_CRIT", "50"))
 ALERT_QUEUE_WARN = int(os.getenv("SERIEMA_ALERT_QUEUE_WARN", "25"))
 ALERT_ACK_RATE_WARN = float(os.getenv("SERIEMA_ALERT_ACK_RATE_WARN", "0.9"))
+CB_FAILURE_THRESHOLD = int(os.getenv("SERIEMA_CB_FAILURE_THRESHOLD", "5"))
+CB_OPEN_SECONDS = int(os.getenv("SERIEMA_CB_OPEN_SECONDS", "60"))
 
 
 def queue_name(suffix: str) -> str:

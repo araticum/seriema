@@ -15,6 +15,8 @@ from .config import (
     DLQ_REPLAY_DRY_RUN,
     DLQ_REPLAY_LOCK_TTL_SECONDS,
     DLQ_REPLAY_INTERVAL_SECONDS,
+    CB_FAILURE_THRESHOLD,
+    CB_OPEN_SECONDS,
     CELERY_TASK_MAX_RETRIES,
     CELERY_TASK_RETRY_BACKOFF,
     CELERY_TASK_RETRY_BACKOFF_MAX,
@@ -94,6 +96,49 @@ def _notification_is_terminal(notification: Notification) -> bool:
         NotificationStatus.DELIVERED,
         NotificationStatus.ANSWERED_VOICE,
     }
+
+
+def _channel_name(channel: NotificationChannel | str) -> str:
+    return _notification_channel_value(channel).upper()
+
+
+def _channel_circuit_open_key(channel: NotificationChannel | str) -> str:
+    return prefixed_redis_key(f"cb:{_channel_name(channel).lower()}:open")
+
+
+def _channel_circuit_failure_key(channel: NotificationChannel | str) -> str:
+    return prefixed_redis_key(f"cb:{_channel_name(channel).lower()}:failures")
+
+
+def _channel_is_circuit_open(channel: NotificationChannel | str) -> bool:
+    return bool(redis_conn.exists(_channel_circuit_open_key(channel)))
+
+
+def _reset_channel_circuit_state(channel: NotificationChannel | str) -> None:
+    redis_conn.delete(_channel_circuit_failure_key(channel))
+
+
+def _open_channel_circuit(channel: NotificationChannel | str) -> None:
+    channel_name = _channel_name(channel)
+    pipe = redis_conn.pipeline()
+    pipe.set(_channel_circuit_open_key(channel_name), "1", ex=CB_OPEN_SECONDS)
+    pipe.delete(_channel_circuit_failure_key(channel_name))
+    pipe.execute()
+
+
+def _record_channel_failure(channel: NotificationChannel | str) -> dict[str, int | bool | str]:
+    channel_name = _channel_name(channel)
+    failures = redis_conn.incr(_channel_circuit_failure_key(channel_name))
+    opened = failures >= CB_FAILURE_THRESHOLD
+    if opened:
+        _open_channel_circuit(channel_name)
+    _touch_metrics(
+        {
+            f"cb_failures:{channel_name.lower()}": failures,
+            f"cb_open:{channel_name.lower()}": int(opened),
+        }
+    )
+    return {"channel": channel_name, "failures": failures, "opened": opened}
 
 
 def _metric_timestamp() -> str:
@@ -272,6 +317,7 @@ def _record_final_failure(
         trace_id = payload.get("trace_id") or str(uuid.uuid4())
         notification_id = payload.get("notification_id")
         incident_id = payload.get("incident_id")
+        channel_name = None
 
         if notification_id:
             notification = (
@@ -283,14 +329,15 @@ def _record_final_failure(
             if notification and not _notification_is_terminal(notification):
                 notification.status = NotificationStatus.FAILED
                 notification.error_message = payload.get("error")
-                _increment_metric_counter(
-                    "tasks_failed_by_channel",
-                    _notification_channel_value(notification.channel),
-                )
+                channel_name = _notification_channel_value(notification.channel)
             if notification and not incident_id:
                 incident_id = notification.incident_id
         elif task_name == "escalation_worker":
             _increment_metric_counter("tasks_failed_by_channel", "ESCALATION")
+
+        if channel_name in {"VOICE", "TELEGRAM", "EMAIL"}:
+            _increment_metric_counter("tasks_failed_by_channel", channel_name)
+            _record_channel_failure(channel_name)
 
         db.add(
             AuditLog(
@@ -373,7 +420,42 @@ def _mark_notification_sent(
     )
     db.add(audit)
     db.commit()
+    _reset_channel_circuit_state(provider_channel)
     return True
+
+
+def _send_notification_channel_impl(
+    notification_id: str,
+    trace_id: str,
+    provider_channel: NotificationChannel | str,
+):
+    channel_name = _channel_name(provider_channel)
+    if channel_name in {"VOICE", "TELEGRAM", "EMAIL"} and _channel_is_circuit_open(channel_name):
+        return {
+            "status": "skipped_circuit",
+            "channel": channel_name,
+            "notification_id": notification_id,
+            "trace_id": trace_id,
+        }
+
+    db: Session = SessionLocal()
+    try:
+        sent = _mark_notification_sent(db, notification_id, trace_id, channel_name)
+        if sent:
+            return {
+                "status": "sent",
+                "channel": channel_name,
+                "notification_id": notification_id,
+                "trace_id": trace_id,
+            }
+        return {
+            "status": "already_terminal",
+            "channel": channel_name,
+            "notification_id": notification_id,
+            "trace_id": trace_id,
+        }
+    finally:
+        db.close()
 
 
 @celery_app.task(name="dispatcher")
@@ -444,15 +526,11 @@ def dispatch_incident(incident_id: str, incoming_trace_id: str):
     time_limit=CELERY_TASK_TIME_LIMIT,
 )
 def send_voice_call(self, notification_id: str, trace_id: str):
-    return _send_voice_call_impl(notification_id, trace_id)
+    return _send_notification_channel_impl(notification_id, trace_id, NotificationChannel.VOICE)
 
 
 def _send_voice_call_impl(notification_id: str, trace_id: str):
-    db: Session = SessionLocal()
-    try:
-        return _mark_notification_sent(db, notification_id, trace_id, "VOICE")
-    finally:
-        db.close()
+    return _send_notification_channel_impl(notification_id, trace_id, NotificationChannel.VOICE)
 
 
 @celery_app.task(
@@ -467,15 +545,11 @@ def _send_voice_call_impl(notification_id: str, trace_id: str):
     time_limit=CELERY_TASK_TIME_LIMIT,
 )
 def send_telegram_message(self, notification_id: str, trace_id: str):
-    return _send_telegram_message_impl(notification_id, trace_id)
+    return _send_notification_channel_impl(notification_id, trace_id, NotificationChannel.TELEGRAM)
 
 
 def _send_telegram_message_impl(notification_id: str, trace_id: str):
-    db: Session = SessionLocal()
-    try:
-        return _mark_notification_sent(db, notification_id, trace_id, "TELEGRAM")
-    finally:
-        db.close()
+    return _send_notification_channel_impl(notification_id, trace_id, NotificationChannel.TELEGRAM)
 
 
 @celery_app.task(
@@ -490,15 +564,11 @@ def _send_telegram_message_impl(notification_id: str, trace_id: str):
     time_limit=CELERY_TASK_TIME_LIMIT,
 )
 def send_email_message(self, notification_id: str, trace_id: str):
-    return _send_email_message_impl(notification_id, trace_id)
+    return _send_notification_channel_impl(notification_id, trace_id, NotificationChannel.EMAIL)
 
 
 def _send_email_message_impl(notification_id: str, trace_id: str):
-    db: Session = SessionLocal()
-    try:
-        return _mark_notification_sent(db, notification_id, trace_id, "EMAIL")
-    finally:
-        db.close()
+    return _send_notification_channel_impl(notification_id, trace_id, NotificationChannel.EMAIL)
 
 
 @celery_app.task(
@@ -591,14 +661,23 @@ def _replay_entry(entry: dict) -> bool:
     kwargs = entry.get("kwargs", {})
 
     if task_name == "voice_worker":
-        _send_voice_call_impl(args[0], args[1])
-        return True
+        result = _send_voice_call_impl(args[0], args[1])
+        return isinstance(result, dict) and result.get("status") in {
+            "sent",
+            "already_terminal",
+        }
     if task_name == "telegram_worker":
-        _send_telegram_message_impl(args[0], args[1])
-        return True
+        result = _send_telegram_message_impl(args[0], args[1])
+        return isinstance(result, dict) and result.get("status") in {
+            "sent",
+            "already_terminal",
+        }
     if task_name == "email_worker":
-        _send_email_message_impl(args[0], args[1])
-        return True
+        result = _send_email_message_impl(args[0], args[1])
+        return isinstance(result, dict) and result.get("status") in {
+            "sent",
+            "already_terminal",
+        }
     if task_name == "escalation_worker":
         return _handle_escalation_impl(args[0], args[1])
     return False

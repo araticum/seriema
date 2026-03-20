@@ -20,6 +20,8 @@ def _fresh_worker(
     dry_run: str = "true",
     dlq_max_items: str = "1000",
     lock_ttl: str = "60",
+    cb_failure_threshold: str = "5",
+    cb_open_seconds: str = "60",
 ):
     monkeypatch.setenv("SERIEMA_REDIS_KEY_PREFIX", prefix)
     monkeypatch.setenv("SERIEMA_QUEUE_PREFIX", f"queue:{prefix}")
@@ -28,6 +30,8 @@ def _fresh_worker(
     monkeypatch.setenv("SERIEMA_DLQ_REPLAY_BATCH_SIZE", "10")
     monkeypatch.setenv("SERIEMA_DLQ_MAX_ITEMS", dlq_max_items)
     monkeypatch.setenv("SERIEMA_DLQ_REPLAY_LOCK_TTL_SECONDS", lock_ttl)
+    monkeypatch.setenv("SERIEMA_CB_FAILURE_THRESHOLD", cb_failure_threshold)
+    monkeypatch.setenv("SERIEMA_CB_OPEN_SECONDS", cb_open_seconds)
     monkeypatch.setenv("SERIEMA_OPS_MAX_LIMIT", "100")
     monkeypatch.setenv("SERIEMA_METRICS_KEY", "metrics:ops")
     monkeypatch.setenv("SERIEMA_METRICS_TTL_SECONDS", "120")
@@ -234,3 +238,82 @@ def test_replay_dlq_releases_lock_after_success(monkeypatch):
     assert result["status"] == "completed"
     assert result["dry_run"] is True
     assert redis_client.redis_conn.get(worker.DLQ_REPLAY_LOCK_KEY) is None
+
+
+def test_voice_circuit_opens_and_skips_while_open(monkeypatch):
+    prefix = f"pytest:{uuid.uuid4().hex}"
+    _, redis_client, worker = _fresh_worker(
+        monkeypatch,
+        prefix=prefix,
+        dry_run="true",
+        cb_failure_threshold="2",
+        cb_open_seconds="60",
+    )
+
+    _clear_prefix(redis_client.redis_conn, prefix)
+
+    first = worker._record_channel_failure(worker.NotificationChannel.VOICE)
+    second = worker._record_channel_failure(worker.NotificationChannel.VOICE)
+
+    assert first["opened"] is False
+    assert second["opened"] is True
+    assert redis_client.redis_conn.exists(worker._channel_circuit_open_key("VOICE")) == 1
+
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("mark_notification_sent should not be called while circuit is open")
+
+    monkeypatch.setattr(worker, "_mark_notification_sent", _fail_if_called)
+    result = worker._send_voice_call_impl("notification-circuit", "trace-circuit")
+
+    assert result["status"] == "skipped_circuit"
+    assert result["channel"] == "VOICE"
+    assert result["notification_id"] == "notification-circuit"
+
+
+def test_success_resets_channel_failure_counter(monkeypatch):
+    prefix = f"pytest:{uuid.uuid4().hex}"
+    _, redis_client, worker = _fresh_worker(
+        monkeypatch,
+        prefix=prefix,
+        dry_run="true",
+        cb_failure_threshold="3",
+    )
+
+    _clear_prefix(redis_client.redis_conn, prefix)
+
+    worker._record_channel_failure(worker.NotificationChannel.VOICE)
+    assert redis_client.redis_conn.get(worker._channel_circuit_failure_key("VOICE")) == b"1"
+
+    from Seriema import models
+
+    db = worker.SessionLocal()
+    try:
+        contact = models.Contact(name="Circuit Reset", email="reset@example.com")
+        incident = models.Incident(
+            external_event_id=f"evt-{uuid.uuid4().hex}",
+            source="pytest",
+            severity="LOW",
+            title="reset",
+            status=worker.IncidentStatus.OPEN,
+        )
+        db.add(contact)
+        db.add(incident)
+        db.commit()
+        db.refresh(contact)
+        db.refresh(incident)
+
+        notification = models.Notification(
+            incident_id=incident.id,
+            contact_id=contact.id,
+            channel=worker.NotificationChannel.VOICE,
+        )
+        db.add(notification)
+        db.commit()
+        db.refresh(notification)
+    finally:
+        db.close()
+
+    result = worker._send_voice_call_impl(str(notification.id), "trace-success")
+
+    assert result["status"] == "sent"
+    assert redis_client.redis_conn.get(worker._channel_circuit_failure_key("VOICE")) is None
