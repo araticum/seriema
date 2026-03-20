@@ -13,6 +13,7 @@ from .config import (
     DLQ_PRUNE_INTERVAL_SECONDS,
     DLQ_REPLAY_BATCH_SIZE,
     DLQ_REPLAY_DRY_RUN,
+    DLQ_REPLAY_LOCK_TTL_SECONDS,
     DLQ_REPLAY_INTERVAL_SECONDS,
     CELERY_TASK_MAX_RETRIES,
     CELERY_TASK_RETRY_BACKOFF,
@@ -43,6 +44,7 @@ from .models import (
 from .redis_client import redis_conn
 
 DLQ_REDIS_KEY = prefixed_redis_key(DLQ_QUEUE_NAME)
+DLQ_REPLAY_LOCK_KEY = prefixed_redis_key(f"{DLQ_QUEUE_NAME}:replay:lock")
 METRICS_REDIS_KEY = prefixed_redis_key(METRICS_KEY)
 
 celery_app = Celery("event_saas", broker=REDIS_URL, backend=REDIS_URL)
@@ -153,6 +155,25 @@ def _snapshot_queue_backlog() -> dict[str, int | str]:
 def _bound_replay_limit(limit: int | None) -> int:
     requested = DLQ_REPLAY_BATCH_SIZE if limit is None else int(limit)
     return max(1, min(requested, OPS_ENDPOINT_MAX_LIMIT))
+
+
+def _acquire_dlq_replay_lock() -> str | None:
+    token = uuid.uuid4().hex
+    acquired = redis_conn.set(
+        DLQ_REPLAY_LOCK_KEY,
+        token,
+        nx=True,
+        ex=DLQ_REPLAY_LOCK_TTL_SECONDS,
+    )
+    return token if acquired else None
+
+
+def _release_dlq_replay_lock(token: str | None) -> None:
+    if not token:
+        return
+    current = redis_conn.get(DLQ_REPLAY_LOCK_KEY)
+    if current is not None and current.decode() == token:
+        redis_conn.delete(DLQ_REPLAY_LOCK_KEY)
 
 
 def _get_or_create_notification(
@@ -586,40 +607,54 @@ def _replay_entry(entry: dict) -> bool:
 @celery_app.task(name="replay_dlq")
 def replay_dlq(limit: int | None = None):
     batch_limit = _bound_replay_limit(limit)
+    lock_token = _acquire_dlq_replay_lock()
+    if not lock_token:
+        return {
+            "status": "locked",
+            "replayed": 0,
+            "remaining": redis_conn.llen(DLQ_REDIS_KEY),
+            "dry_run": DLQ_REPLAY_DRY_RUN,
+            "limit": batch_limit,
+            "candidates": None,
+        }
 
-    raw_entries = redis_conn.lrange(DLQ_REDIS_KEY, 0, batch_limit - 1)
-    replayed = 0
-    candidates = []
+    try:
+        raw_entries = redis_conn.lrange(DLQ_REDIS_KEY, 0, batch_limit - 1)
+        replayed = 0
+        candidates = []
 
-    for raw_entry in raw_entries:
-        try:
-            entry = json.loads(raw_entry)
-            candidates.append(entry)
-            if DLQ_REPLAY_DRY_RUN:
+        for raw_entry in raw_entries:
+            try:
+                entry = json.loads(raw_entry)
+                candidates.append(entry)
+                if DLQ_REPLAY_DRY_RUN:
+                    continue
+                if _replay_entry(entry):
+                    redis_conn.lrem(DLQ_REDIS_KEY, 1, raw_entry)
+                    replayed += 1
+                    _refresh_dlq_metric()
+            except Exception:
                 continue
-            if _replay_entry(entry):
-                redis_conn.lrem(DLQ_REDIS_KEY, 1, raw_entry)
-                replayed += 1
-                _refresh_dlq_metric()
-        except Exception:
-            continue
 
-    _refresh_dlq_metric()
-    result = {
-        "replayed": replayed,
-        "remaining": redis_conn.llen(DLQ_REDIS_KEY),
-        "dry_run": DLQ_REPLAY_DRY_RUN,
-        "limit": batch_limit,
-        "candidates": candidates if DLQ_REPLAY_DRY_RUN else None,
-    }
-    if DLQ_REPLAY_DRY_RUN:
-        _touch_metrics(
-            {
-                "dlq_dry_run_candidates": len(candidates),
-                "dlq_dry_run_limit": batch_limit,
-            }
-        )
-    return result
+        _refresh_dlq_metric()
+        result = {
+            "status": "completed",
+            "replayed": replayed,
+            "remaining": redis_conn.llen(DLQ_REDIS_KEY),
+            "dry_run": DLQ_REPLAY_DRY_RUN,
+            "limit": batch_limit,
+            "candidates": candidates if DLQ_REPLAY_DRY_RUN else None,
+        }
+        if DLQ_REPLAY_DRY_RUN:
+            _touch_metrics(
+                {
+                    "dlq_dry_run_candidates": len(candidates),
+                    "dlq_dry_run_limit": batch_limit,
+                }
+            )
+        return result
+    finally:
+        _release_dlq_replay_lock(lock_token)
 
 
 @celery_app.task(name="queue_metrics_snapshot")

@@ -4,6 +4,7 @@ from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.sql.elements import BinaryExpression
 
 from Seriema import main, models, schemas
 
@@ -122,6 +123,95 @@ class FakeReplayTask:
 
     def apply_async(self, args=None, kwargs=None):
         return FakeAsyncResult(self.payload)
+
+
+@dataclass
+class IncidentFixture:
+    id: str
+    external_event_id: str
+    source: str
+    severity: str
+    title: str
+    message: str | None
+    payload_json: dict | None
+    status: object
+    matched_rule_id: str | None
+    dedupe_key: str | None
+    created_at: datetime
+    updated_at: datetime | None = None
+    acknowledged_at: datetime | None = None
+    acknowledged_by: str | None = None
+
+
+class FakeIncidentQuery:
+    def __init__(self, incidents, count_mode=False):
+        self._incidents = list(incidents)
+        self._count_mode = count_mode
+        self._filters = []
+        self._offset = 0
+        self._limit = None
+        self._ordered = False
+
+    def filter(self, *criteria):
+        self._filters.extend(criteria)
+        return self
+
+    def order_by(self, *criteria):
+        self._ordered = True
+        return self
+
+    def offset(self, value):
+        self._offset = value
+        return self
+
+    def limit(self, value):
+        self._limit = value
+        return self
+
+    def _matches(self, incident):
+        for criterion in self._filters:
+            if isinstance(criterion, BinaryExpression):
+                field = getattr(criterion.left, "key", None) or getattr(criterion.left, "name", None)
+                expected = getattr(criterion.right, "value", None)
+                if field is None:
+                    continue
+                actual = getattr(incident, field)
+                if actual != expected:
+                    return False
+        return True
+
+    def _filtered(self):
+        items = [incident for incident in self._incidents if self._matches(incident)]
+        if self._ordered:
+            items.sort(key=lambda incident: (incident.created_at, incident.id), reverse=True)
+        if self._offset:
+            items = items[self._offset :]
+        if self._limit is not None:
+            items = items[: self._limit]
+        return items
+
+    def scalar(self):
+        if self._count_mode:
+            return len([incident for incident in self._incidents if self._matches(incident)])
+        return None
+
+    def all(self):
+        return self._filtered()
+
+    def first(self):
+        items = self._filtered()
+        return items[0] if items else None
+
+
+class FakeIncidentSession(FakeSession):
+    def __init__(self, incidents):
+        super().__init__(queries=[])
+        self._incidents = list(incidents)
+
+    def query(self, *args, **kwargs):
+        if len(args) == 1 and args[0] is models.Incident:
+            return FakeIncidentQuery(self._incidents, count_mode=False)
+        return FakeIncidentQuery(self._incidents, count_mode=True)
 
 
 @pytest.fixture(autouse=True)
@@ -406,3 +496,127 @@ def test_ops_dlq_preview_and_replay_auth_and_limit(client, monkeypatch):
     replay_payload = replay.json()
     assert replay_payload["status"] == "completed"
     assert replay_payload["result"]["replayed"] == 1
+
+
+def test_list_incidents_filters_and_pagination(client):
+    incidents = [
+        IncidentFixture(
+            id="00000000-0000-0000-0000-000000000001",
+            external_event_id="evt-1",
+            source="prometheus",
+            severity="CRITICAL",
+            title="Critical 1",
+            message="m1",
+            payload_json={"n": 1},
+            status=models.IncidentStatus.ACKNOWLEDGED,
+            matched_rule_id=None,
+            dedupe_key="d1",
+            created_at=datetime(2026, 3, 20, 10, 0, 0),
+            acknowledged_at=datetime(2026, 3, 20, 10, 10, 0),
+            acknowledged_by="1",
+        ),
+        IncidentFixture(
+            id="00000000-0000-0000-0000-000000000002",
+            external_event_id="evt-2",
+            source="prometheus",
+            severity="CRITICAL",
+            title="Critical 2",
+            message="m2",
+            payload_json={"n": 2},
+            status=models.IncidentStatus.OPEN,
+            matched_rule_id=None,
+            dedupe_key="d2",
+            created_at=datetime(2026, 3, 20, 11, 0, 0),
+        ),
+        IncidentFixture(
+            id="00000000-0000-0000-0000-000000000003",
+            external_event_id="evt-3",
+            source="grafana",
+            severity="WARN",
+            title="Warn 3",
+            message="m3",
+            payload_json={"n": 3},
+            status=models.IncidentStatus.ACKNOWLEDGED,
+            matched_rule_id=None,
+            dedupe_key="d3",
+            created_at=datetime(2026, 3, 20, 12, 0, 0),
+            acknowledged_at=datetime(2026, 3, 20, 12, 5, 0),
+            acknowledged_by="2",
+        ),
+    ]
+    fake_session = FakeIncidentSession(incidents)
+    main.app.dependency_overrides[main.get_db] = lambda: fake_session
+
+    response = client.get("/incidents?status=ACKNOWLEDGED&source=prometheus&severity=CRITICAL&limit=10&offset=0")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 1
+    assert payload["limit"] == 10
+    assert payload["offset"] == 0
+    assert len(payload["items"]) == 1
+    assert payload["items"][0]["id"] == "00000000-0000-0000-0000-000000000001"
+    assert payload["items"][0]["source"] == "prometheus"
+
+
+def test_list_incidents_pagination_and_order(client):
+    incidents = [
+        IncidentFixture(
+            id="00000000-0000-0000-0000-000000000011",
+            external_event_id="evt-11",
+            source="s1",
+            severity="CRITICAL",
+            title="11",
+            message=None,
+            payload_json=None,
+            status=models.IncidentStatus.OPEN,
+            matched_rule_id=None,
+            dedupe_key=None,
+            created_at=datetime(2026, 3, 20, 9, 0, 0),
+        ),
+        IncidentFixture(
+            id="00000000-0000-0000-0000-000000000012",
+            external_event_id="evt-12",
+            source="s2",
+            severity="CRITICAL",
+            title="12",
+            message=None,
+            payload_json=None,
+            status=models.IncidentStatus.OPEN,
+            matched_rule_id=None,
+            dedupe_key=None,
+            created_at=datetime(2026, 3, 20, 10, 0, 0),
+        ),
+        IncidentFixture(
+            id="00000000-0000-0000-0000-000000000013",
+            external_event_id="evt-13",
+            source="s3",
+            severity="CRITICAL",
+            title="13",
+            message=None,
+            payload_json=None,
+            status=models.IncidentStatus.OPEN,
+            matched_rule_id=None,
+            dedupe_key=None,
+            created_at=datetime(2026, 3, 20, 11, 0, 0),
+        ),
+    ]
+    fake_session = FakeIncidentSession(incidents)
+    main.app.dependency_overrides[main.get_db] = lambda: fake_session
+
+    response = client.get("/incidents?limit=2&offset=1")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 3
+    assert payload["limit"] == 2
+    assert payload["offset"] == 1
+    assert [item["id"] for item in payload["items"]] == [
+        "00000000-0000-0000-0000-000000000012",
+        "00000000-0000-0000-0000-000000000011",
+    ]
+
+
+def test_list_incidents_limit_above_max(client):
+    response = client.get(f"/incidents?limit={main.OPS_ENDPOINT_MAX_LIMIT + 1}")
+    assert response.status_code == 422

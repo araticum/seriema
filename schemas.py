@@ -98,6 +98,12 @@ class IncidentDetailsResponse(BaseModel):
     incident: IncidentResponse
     logs: List[AuditLogResponse]
 
+class IncidentListResponse(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    items: List[IncidentResponse]
+
 class IncidentStatusCount(BaseModel):
     status: IncidentStatus
     count: int

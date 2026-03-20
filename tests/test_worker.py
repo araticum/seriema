@@ -19,6 +19,7 @@ def _fresh_worker(
     prefix: str,
     dry_run: str = "true",
     dlq_max_items: str = "1000",
+    lock_ttl: str = "60",
 ):
     monkeypatch.setenv("SERIEMA_REDIS_KEY_PREFIX", prefix)
     monkeypatch.setenv("SERIEMA_QUEUE_PREFIX", f"queue:{prefix}")
@@ -26,6 +27,7 @@ def _fresh_worker(
     monkeypatch.setenv("SERIEMA_DLQ_REPLAY_DRY_RUN", dry_run)
     monkeypatch.setenv("SERIEMA_DLQ_REPLAY_BATCH_SIZE", "10")
     monkeypatch.setenv("SERIEMA_DLQ_MAX_ITEMS", dlq_max_items)
+    monkeypatch.setenv("SERIEMA_DLQ_REPLAY_LOCK_TTL_SECONDS", lock_ttl)
     monkeypatch.setenv("SERIEMA_OPS_MAX_LIMIT", "100")
     monkeypatch.setenv("SERIEMA_METRICS_KEY", "metrics:ops")
     monkeypatch.setenv("SERIEMA_METRICS_TTL_SECONDS", "120")
@@ -168,3 +170,67 @@ def test_dlq_truncates_and_prunes_to_max_items(monkeypatch):
     assert result["remaining"] == 1
     assert result["max_items"] == 1
     assert redis_client.redis_conn.llen(worker.DLQ_REDIS_KEY) == 1
+
+
+def test_replay_dlq_returns_locked_when_lock_is_held(monkeypatch):
+    prefix = f"pytest:{uuid.uuid4().hex}"
+    _, redis_client, worker = _fresh_worker(monkeypatch, prefix=prefix, dry_run="false")
+
+    _clear_prefix(redis_client.redis_conn, prefix)
+
+    redis_client.redis_conn.set(worker.DLQ_REPLAY_LOCK_KEY, "other-token", ex=60)
+    redis_client.redis_conn.rpush(
+        worker.DLQ_REDIS_KEY,
+        json.dumps(
+            {
+                "task_name": "voice_worker",
+                "args": ["notification-locked", "trace-locked"],
+                "kwargs": {},
+                "trace_id": "trace-locked",
+                "notification_id": "notification-locked",
+                "incident_id": "incident-locked",
+                "error": "boom",
+                "failed_at": "fixed-locked",
+            }
+        ),
+    )
+
+    result = worker.replay_dlq(limit=1)
+
+    assert result["status"] == "locked"
+    assert result["replayed"] == 0
+    assert redis_client.redis_conn.llen(worker.DLQ_REDIS_KEY) == 1
+    assert redis_client.redis_conn.get(worker.DLQ_REPLAY_LOCK_KEY) == b"other-token"
+
+
+def test_replay_dlq_releases_lock_after_success(monkeypatch):
+    prefix = f"pytest:{uuid.uuid4().hex}"
+    _, redis_client, worker = _fresh_worker(
+        monkeypatch,
+        prefix=prefix,
+        dry_run="true",
+    )
+
+    _clear_prefix(redis_client.redis_conn, prefix)
+
+    redis_client.redis_conn.rpush(
+        worker.DLQ_REDIS_KEY,
+        json.dumps(
+            {
+                "task_name": "email_worker",
+                "args": ["notification-release", "trace-release"],
+                "kwargs": {},
+                "trace_id": "trace-release",
+                "notification_id": "notification-release",
+                "incident_id": "incident-release",
+                "error": "boom",
+                "failed_at": "fixed-release",
+            }
+        ),
+    )
+
+    result = worker.replay_dlq(limit=1)
+
+    assert result["status"] == "completed"
+    assert result["dry_run"] is True
+    assert redis_client.redis_conn.get(worker.DLQ_REPLAY_LOCK_KEY) is None

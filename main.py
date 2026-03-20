@@ -542,6 +542,43 @@ def get_incident(incident_id: str, db: Session = Depends(get_db)):
         logs=[_serialize_audit(log) for log in audit_logs],
     )
 
+@app.get("/incidents", response_model=schemas.IncidentListResponse)
+def list_incidents(
+    status: models.IncidentStatus | None = Query(default=None),
+    source: str | None = Query(default=None),
+    severity: str | None = Query(default=None),
+    limit: int = Query(20, ge=1, le=OPS_ENDPOINT_MAX_LIMIT),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    query = db.query(models.Incident)
+    count_query = db.query(func.count(models.Incident.id))
+
+    if status is not None:
+        query = query.filter(models.Incident.status == status)
+        count_query = count_query.filter(models.Incident.status == status)
+    if source:
+        query = query.filter(models.Incident.source == source)
+        count_query = count_query.filter(models.Incident.source == source)
+    if severity:
+        query = query.filter(models.Incident.severity == severity)
+        count_query = count_query.filter(models.Incident.severity == severity)
+
+    total = int(count_query.scalar() or 0)
+    incidents = (
+        query.order_by(models.Incident.created_at.desc(), models.Incident.id.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    return schemas.IncidentListResponse(
+        total=total,
+        limit=limit,
+        offset=offset,
+        items=[_serialize_incident(incident) for incident in incidents],
+    )
+
 @app.get("/metrics/sla", response_model=schemas.SLAMetricsResponse)
 def get_sla_metrics(
     hours: int = Query(24, ge=1, le=720),
