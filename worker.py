@@ -224,6 +224,17 @@ def _refresh_dlq_metric() -> None:
     _touch_metrics({"dlq_size": redis_conn.llen(DLQ_REDIS_KEY)})
 
 
+def _record_periodic_task_heartbeat(task_name: str, started_monotonic: float, status: str) -> None:
+    duration_ms = max(0, int((time.monotonic() - started_monotonic) * 1000))
+    _touch_metrics(
+        {
+            f"last_run_at:{task_name}": _metric_timestamp(),
+            f"last_status:{task_name}": status,
+            f"duration_ms:{task_name}": duration_ms,
+        }
+    )
+
+
 def _write_dlq_replay_report(
     *,
     status: str,
@@ -868,6 +879,7 @@ def _handle_escalation_impl(incident_id: str, trace_id: str):
 def stale_incident_sweeper():
     db: Session = SessionLocal()
     swept = 0
+    started_monotonic = time.monotonic()
     try:
         try:
             cutoff = _stale_cutoff()
@@ -898,20 +910,10 @@ def stale_incident_sweeper():
             if swept:
                 db.commit()
             result = {"swept": swept, "cutoff": cutoff.isoformat()}
-            _touch_metrics(
-                {
-                    "last_run_at:stale_incident_sweeper": _metric_timestamp(),
-                    "last_status:stale_incident_sweeper": "ok",
-                }
-            )
+            _record_periodic_task_heartbeat("stale_incident_sweeper", started_monotonic, "ok")
             return result
         except Exception:
-            _touch_metrics(
-                {
-                    "last_run_at:stale_incident_sweeper": _metric_timestamp(),
-                    "last_status:stale_incident_sweeper": "error",
-                }
-            )
+            _record_periodic_task_heartbeat("stale_incident_sweeper", started_monotonic, "error")
             raise
     finally:
         db.close()
@@ -1048,27 +1050,19 @@ def replay_dlq(limit: int | None = None):
 
 @celery_app.task(name="queue_metrics_snapshot")
 def queue_metrics_snapshot():
+    started_monotonic = time.monotonic()
     try:
         result = _snapshot_queue_backlog()
-        _touch_metrics(
-            {
-                "last_run_at:queue_metrics_snapshot": _metric_timestamp(),
-                "last_status:queue_metrics_snapshot": "ok",
-            }
-        )
+        _record_periodic_task_heartbeat("queue_metrics_snapshot", started_monotonic, "ok")
         return result
     except Exception:
-        _touch_metrics(
-            {
-                "last_run_at:queue_metrics_snapshot": _metric_timestamp(),
-                "last_status:queue_metrics_snapshot": "error",
-            }
-        )
+        _record_periodic_task_heartbeat("queue_metrics_snapshot", started_monotonic, "error")
         raise
 
 
 @celery_app.task(name="prune_dlq")
 def prune_dlq(max_items: int | None = None):
+    started_monotonic = time.monotonic()
     try:
         limit = _bound_dlq_max_items(max_items)
         current_size = redis_conn.llen(DLQ_REDIS_KEY)
@@ -1082,18 +1076,8 @@ def prune_dlq(max_items: int | None = None):
             _refresh_dlq_metric()
             result = {"removed": removed, "remaining": remaining, "max_items": limit}
 
-        _touch_metrics(
-            {
-                "last_run_at:prune_dlq": _metric_timestamp(),
-                "last_status:prune_dlq": "ok",
-            }
-        )
+        _record_periodic_task_heartbeat("prune_dlq", started_monotonic, "ok")
         return result
     except Exception:
-        _touch_metrics(
-            {
-                "last_run_at:prune_dlq": _metric_timestamp(),
-                "last_status:prune_dlq": "error",
-            }
-        )
+        _record_periodic_task_heartbeat("prune_dlq", started_monotonic, "error")
         raise

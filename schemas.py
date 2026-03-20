@@ -261,6 +261,18 @@ class OpsIntegrationStatusResponse(BaseModel):
     dlq_reporting_signal: bool
     evidence: Dict[str, Any] = Field(default_factory=dict)
 
+class OpsReadinessCheck(BaseModel):
+    name: str
+    passed: bool
+    details: str
+
+class OpsReadinessResponse(BaseModel):
+    score: int
+    status: Literal["green", "yellow", "red"]
+    checks: List[OpsReadinessCheck]
+    blockers: List[str] = Field(default_factory=list)
+    evidence: Dict[str, Any] = Field(default_factory=dict)
+
 class OperationalAlert(BaseModel):
     alert_type: str
     severity: Literal["info", "warn", "critical"]

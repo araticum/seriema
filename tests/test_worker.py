@@ -404,7 +404,28 @@ def test_queue_metrics_snapshot(monkeypatch):
     assert metrics[b"queue_backlog:dlq"] == b"1"
     assert metrics[b"last_status:queue_metrics_snapshot"] == b"ok"
     assert b"last_run_at:queue_metrics_snapshot" in metrics
+    assert int(metrics[b"duration_ms:queue_metrics_snapshot"]) >= 0
     assert b"updated_at" in metrics
+
+
+def test_queue_metrics_snapshot_records_duration_on_error(monkeypatch):
+    prefix = f"pytest:{uuid.uuid4().hex}"
+    _, redis_client, worker = _fresh_worker(monkeypatch, prefix=prefix, dry_run="true")
+
+    _clear_prefix(redis_client.redis_conn, prefix)
+
+    def _boom():
+        raise RuntimeError("snapshot failed")
+
+    monkeypatch.setattr(worker, "_snapshot_queue_backlog", _boom)
+
+    with pytest.raises(RuntimeError, match="snapshot failed"):
+        worker.queue_metrics_snapshot()
+
+    metrics = redis_client.redis_conn.hgetall(worker.METRICS_REDIS_KEY)
+    assert metrics[b"last_status:queue_metrics_snapshot"] == b"error"
+    assert b"last_run_at:queue_metrics_snapshot" in metrics
+    assert int(metrics[b"duration_ms:queue_metrics_snapshot"]) >= 0
 
 
 def test_replay_dlq_dry_run_does_not_remove_items(monkeypatch):
@@ -590,6 +611,7 @@ def test_dlq_truncates_and_prunes_to_max_items(monkeypatch):
     metrics = redis_client.redis_conn.hgetall(worker.METRICS_REDIS_KEY)
     assert metrics[b"last_status:prune_dlq"] == b"ok"
     assert b"last_run_at:prune_dlq" in metrics
+    assert int(metrics[b"duration_ms:prune_dlq"]) >= 0
 
 
 def test_replay_dlq_returns_locked_when_lock_is_held(monkeypatch):
@@ -1201,3 +1223,4 @@ def test_stale_incident_sweeper_escalates_only_old_open_incidents(monkeypatch):
     metrics = redis_client.redis_conn.hgetall(worker.METRICS_REDIS_KEY)
     assert metrics[b"last_status:stale_incident_sweeper"] == b"ok"
     assert b"last_run_at:stale_incident_sweeper" in metrics
+    assert int(metrics[b"duration_ms:stale_incident_sweeper"]) >= 0

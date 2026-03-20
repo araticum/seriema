@@ -1067,6 +1067,153 @@ def _evaluate_ops_integration_status(db: Session) -> schemas.OpsIntegrationStatu
 def get_ops_integration_status(db: Session = Depends(get_db)):
     return _evaluate_ops_integration_status(db)
 
+def _coerce_redis_text(value) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    value = str(value).strip()
+    return value or None
+
+def _get_heartbeat_snapshot() -> dict[str, dict[str, str | None]]:
+    try:
+        raw_metrics = redis_conn.hgetall(prefixed_redis_key(METRICS_KEY))
+    except Exception as exc:
+        return {"_error": {"error": str(exc)}}
+
+    parsed = {
+        str(key.decode("utf-8") if isinstance(key, bytes) else key): _coerce_redis_text(value)
+        for key, value in raw_metrics.items()
+    }
+
+    heartbeats: dict[str, dict[str, str | None]] = {}
+    for task_name in ("queue_metrics_snapshot", "prune_dlq", "stale_incident_sweeper"):
+        heartbeats[task_name] = {
+            "last_run_at": parsed.get(f"last_run_at:{task_name}"),
+            "last_status": parsed.get(f"last_status:{task_name}"),
+        }
+    return heartbeats
+
+def _evaluate_ops_readiness(db: Session) -> schemas.OpsReadinessResponse:
+    integration = _evaluate_ops_integration_status(db)
+    heartbeats = _get_heartbeat_snapshot()
+
+    checks: list[schemas.OpsReadinessCheck] = []
+    blockers: list[str] = []
+    score = 100
+
+    def add_check(name: str, passed: bool, details: str, weight: int, blocker: bool = False) -> None:
+        nonlocal score
+        checks.append(schemas.OpsReadinessCheck(name=name, passed=passed, details=details))
+        if not passed:
+            score -= weight
+            if blocker:
+                blockers.append(name)
+
+    add_check(
+        "integration_enums",
+        integration.enums_ok,
+        "Incident, notification and audit enums are available." if integration.enums_ok else "One or more enum classes are missing members.",
+        20,
+        blocker=True,
+    )
+    add_check(
+        "fallback_contract",
+        integration.fallback_contract_ok,
+        "Rule fallback policy contract is available." if integration.fallback_contract_ok else "Rule fallback policy contract is unavailable.",
+        15,
+        blocker=True,
+    )
+    add_check(
+        "trace_propagation",
+        integration.trace_propagation_signal,
+        "Audit logs with trace_id were found." if integration.trace_propagation_signal else "No audit log with non-empty trace_id was found.",
+        10,
+    )
+    add_check(
+        "duplicate_event_signal",
+        integration.duplicate_event_signal,
+        "Duplicate event audit signal is present." if integration.duplicate_event_signal else "No duplicate event audit signal found.",
+        10,
+    )
+    add_check(
+        "ack_flow_signal",
+        integration.ack_flow_signal,
+        "Ack flow is observable via acknowledged incidents or ack logs." if integration.ack_flow_signal else "Ack flow signal is absent.",
+        15,
+        blocker=True,
+    )
+    add_check(
+        "escalation_guard_signal",
+        integration.escalation_guard_signal,
+        "Escalation signal exists and no non-open incident was escalated unexpectedly." if integration.escalation_guard_signal else "Escalation guard signal is not satisfied.",
+        10,
+    )
+    add_check(
+        "dlq_reporting_signal",
+        integration.dlq_reporting_signal,
+        "DLQ replay report is available." if integration.dlq_reporting_signal else "DLQ replay report is missing or empty.",
+        15,
+        blocker=True,
+    )
+
+    heartbeat_checks = {
+        "queue_metrics_snapshot": "queue_metrics_snapshot",
+        "prune_dlq": "prune_dlq",
+        "stale_incident_sweeper": "stale_incident_sweeper",
+    }
+    if "_error" in heartbeats:
+        add_check(
+            "heartbeat_access",
+            False,
+            f"Redis heartbeat snapshot unavailable: {heartbeats['_error'].get('error')}",
+            15,
+            blocker=True,
+        )
+    else:
+        for task_name, label in heartbeat_checks.items():
+            heartbeat = heartbeats.get(task_name, {})
+            last_run_at = heartbeat.get("last_run_at")
+            last_status = heartbeat.get("last_status")
+            passed = bool(last_run_at) and last_status == "ok"
+            details = (
+                f"last_run_at={last_run_at}, last_status={last_status}"
+                if passed
+                else f"Missing or unhealthy heartbeat: last_run_at={last_run_at}, last_status={last_status}"
+            )
+            add_check(
+                f"heartbeat:{label}",
+                passed,
+                details,
+                8,
+                blocker=True,
+            )
+
+    score = max(0, min(100, score))
+    if blockers:
+        status = "red"
+    elif any(not check.passed for check in checks):
+        status = "yellow"
+    else:
+        status = "green"
+
+    evidence = {
+        "integration": integration.evidence,
+        "heartbeats": heartbeats,
+    }
+
+    return schemas.OpsReadinessResponse(
+        score=score,
+        status=status,
+        checks=checks,
+        blockers=blockers,
+        evidence=evidence,
+    )
+
+@app.get("/ops/readiness", response_model=schemas.OpsReadinessResponse)
+def get_ops_readiness(db: Session = Depends(get_db)):
+    return _evaluate_ops_readiness(db)
+
 @app.get("/dispatch/voice/twiml/{notification_id}")
 @app.post("/dispatch/voice/twiml/{notification_id}")
 def generate_twiml(notification_id: str, db: Session = Depends(get_db)):

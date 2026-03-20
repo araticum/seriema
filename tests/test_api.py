@@ -896,6 +896,124 @@ def test_ops_integration_status_with_minimal_signals(client, monkeypatch):
         main.app.dependency_overrides.pop(main.get_db, None)
 
 
+def test_ops_readiness_empty_degraded(client, monkeypatch):
+    fake_session = FakeLifecycleSession([], audit_logs=[])
+    fake_redis = FakeRedis(lengths={}, dlq_entries=[], hashes={})
+    main.app.dependency_overrides[main.get_db] = lambda: fake_session
+    monkeypatch.setattr(main, "redis_conn", fake_redis)
+    monkeypatch.setattr(main, "get_dlq_replay_report", lambda: {})
+    try:
+        response = client.get("/ops/readiness")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "red"
+        assert payload["score"] < 70
+        assert any(not check["passed"] for check in payload["checks"])
+        assert payload["blockers"]
+        assert "ack_flow_signal" in payload["blockers"]
+        assert payload["evidence"]["heartbeats"]["queue_metrics_snapshot"]["last_run_at"] is None
+        assert payload["evidence"]["heartbeats"]["queue_metrics_snapshot"]["last_status"] is None
+    finally:
+        main.app.dependency_overrides.pop(main.get_db, None)
+
+
+def test_ops_readiness_healthy(client, monkeypatch):
+    incident_ack = IncidentFixture(
+        id="00000000-0000-0000-0000-00000000f101",
+        external_event_id="evt-ready-1",
+        source="prometheus",
+        severity="CRITICAL",
+        title="Ready ack",
+        message="m",
+        payload_json={"k": "v"},
+        status=models.IncidentStatus.ACKNOWLEDGED,
+        matched_rule_id=None,
+        dedupe_key=None,
+        created_at=datetime(2026, 3, 20, 17, 0, 0),
+        acknowledged_at=datetime(2026, 3, 20, 17, 1, 0),
+        acknowledged_by="alice",
+    )
+    incident_open = IncidentFixture(
+        id="00000000-0000-0000-0000-00000000f102",
+        external_event_id="evt-ready-2",
+        source="grafana",
+        severity="WARN",
+        title="Ready escalate",
+        message="m",
+        payload_json={"k": "v"},
+        status=models.IncidentStatus.OPEN,
+        matched_rule_id=None,
+        dedupe_key=None,
+        created_at=datetime(2026, 3, 20, 18, 0, 0),
+    )
+    audit_logs = [
+        models.AuditLog(
+            id=uuid.UUID("00000000-0000-0000-0000-00000000f201"),
+            trace_id="trace-ready-1",
+            incident_id=uuid.UUID(incident_ack.id),
+            action=models.AuditAction.EVENT_RECEIVED,
+            details_json={"kind": "event"},
+            created_at=datetime(2026, 3, 20, 17, 0, 30),
+        ),
+        models.AuditLog(
+            id=uuid.UUID("00000000-0000-0000-0000-00000000f202"),
+            trace_id="trace-ready-2",
+            incident_id=uuid.UUID(incident_ack.id),
+            action=models.AuditAction.ACK_RECEIVED,
+            details_json={"channel": "api"},
+            created_at=datetime(2026, 3, 20, 17, 1, 0),
+        ),
+        models.AuditLog(
+            id=uuid.UUID("00000000-0000-0000-0000-00000000f203"),
+            trace_id="trace-ready-3",
+            incident_id=uuid.UUID(incident_open.id),
+            action=models.AuditAction.ESCALATED,
+            details_json={"reason": "timeout"},
+            created_at=datetime(2026, 3, 20, 18, 5, 0),
+        ),
+        models.AuditLog(
+            id=uuid.UUID("00000000-0000-0000-0000-00000000f204"),
+            trace_id="trace-ready-4",
+            incident_id=None,
+            action=models.AuditAction.DUPLICATED_EVENT,
+            details_json={"dedupe_key": "dup-ready"},
+            created_at=datetime(2026, 3, 20, 18, 10, 0),
+        ),
+    ]
+    fake_session = FakeLifecycleSession([incident_ack, incident_open], audit_logs=audit_logs)
+    fake_redis = FakeRedis(
+        lengths={},
+        dlq_entries=[],
+        hashes={
+            main.prefixed_redis_key(main.METRICS_KEY): {
+                b"last_run_at:queue_metrics_snapshot": b"2026-03-20T18:15:00+00:00",
+                b"last_status:queue_metrics_snapshot": b"ok",
+                b"last_run_at:prune_dlq": b"2026-03-20T18:16:00+00:00",
+                b"last_status:prune_dlq": b"ok",
+                b"last_run_at:stale_incident_sweeper": b"2026-03-20T18:17:00+00:00",
+                b"last_status:stale_incident_sweeper": b"ok",
+            }
+        },
+    )
+    main.app.dependency_overrides[main.get_db] = lambda: fake_session
+    monkeypatch.setattr(main, "redis_conn", fake_redis)
+    monkeypatch.setattr(main, "get_dlq_replay_report", lambda: {"status": "completed", "replayed": 1})
+    try:
+        response = client.get("/ops/readiness")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "green"
+        assert payload["score"] == 100
+        assert payload["blockers"] == []
+        assert all(check["passed"] is True for check in payload["checks"])
+        assert payload["evidence"]["heartbeats"]["queue_metrics_snapshot"]["last_status"] == "ok"
+        assert payload["evidence"]["integration"]["dlq_reporting"]["report_status"] == "completed"
+    finally:
+        main.app.dependency_overrides.pop(main.get_db, None)
+
+
 def test_list_incidents_filters_and_pagination(client):
     incidents = [
         IncidentFixture(
