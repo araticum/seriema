@@ -144,6 +144,15 @@ class IncidentFixture:
     acknowledged_by: str | None = None
 
 
+@dataclass
+class NotificationFixture:
+    id: str
+    incident_id: str
+    contact_id: str
+    channel: models.NotificationChannel
+    status: models.NotificationStatus
+
+
 class FakeIncidentQuery:
     def __init__(self, incidents, count_mode=False):
         self._incidents = list(incidents)
@@ -159,6 +168,9 @@ class FakeIncidentQuery:
 
     def order_by(self, *criteria):
         self._ordered = True
+        return self
+
+    def with_for_update(self):
         return self
 
     def offset(self, value):
@@ -231,6 +243,9 @@ class FakeModelQuery:
         self._ordered = True
         return self
 
+    def with_for_update(self):
+        return self
+
     def offset(self, value):
         self._offset = value
         return self
@@ -283,6 +298,8 @@ class FakeLifecycleSession(FakeIncidentSession):
             return FakeIncidentQuery(self._incidents, count_mode=False)
         if len(args) == 1 and args[0] is models.AuditLog:
             return FakeModelQuery(self._audit_logs)
+        if len(args) == 1 and args[0] is models.Notification:
+            return FakeModelQuery(getattr(self, "_notifications", []))
         return FakeIncidentQuery(self._incidents, count_mode=True)
 
     def add(self, obj, *args, **kwargs):
@@ -290,6 +307,12 @@ class FakeLifecycleSession(FakeIncidentSession):
         if isinstance(obj, models.AuditLog):
             self._audit_logs.append(obj)
         return None
+
+
+class FakeVoiceSession(FakeLifecycleSession):
+    def __init__(self, incidents, notifications, audit_logs=None):
+        super().__init__(incidents, audit_logs=audit_logs)
+        self._notifications = list(notifications)
 
 
 @dataclass
@@ -439,6 +462,44 @@ def test_health_deps_down(client, monkeypatch):
     assert payload["postgres"]["status"] == "down"
     assert payload["redis"]["status"] == "down"
     assert payload["overall"] == "down"
+
+
+def test_ingest_event_duplicate_records_duplicate_audit(client, monkeypatch):
+    fake_session = FakeLifecycleSession([], audit_logs=[])
+    main.app.dependency_overrides[main.get_db] = lambda: fake_session
+    monkeypatch.setattr(main, "is_duplicate", lambda key: True)
+    try:
+        response = client.post(
+            "/events/incoming",
+            json={
+                "source": "prometheus",
+                "external_event_id": "evt-dup-1",
+                "severity": "CRITICAL",
+                "title": "Duplicate event",
+                "message": "dup",
+                "payload_json": {"a": 1},
+                "dedupe_key": "dup-key-1",
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "ignored"
+        assert payload["reason"] == "duplicate"
+        assert payload["incident_id"] is None
+        assert payload["matched_rule"] is False
+        assert any(
+            isinstance(obj, models.AuditLog) and obj.action == models.AuditAction.DUPLICATED_EVENT
+            for obj in fake_session.added_objects
+        )
+        duplicate_audit = next(
+            obj for obj in fake_session.added_objects
+            if isinstance(obj, models.AuditLog) and obj.action == models.AuditAction.DUPLICATED_EVENT
+        )
+        assert duplicate_audit.incident_id is None
+        assert duplicate_audit.details_json["dedupe_key"] == "dup-key-1"
+    finally:
+        main.app.dependency_overrides.pop(main.get_db, None)
 
 
 def test_metrics_sla_valid(client):
@@ -959,6 +1020,59 @@ def test_resolve_incident_success_404_and_409(client):
 
         conflict = client.post(f"/incidents/{open_incident.id}/resolve", json={"resolved_by": "bob"})
         assert conflict.status_code == 409
+    finally:
+        main.app.dependency_overrides.pop(main.get_db, None)
+
+
+def test_voice_callback_ack_is_idempotent(client):
+    incident = IncidentFixture(
+        id="00000000-0000-0000-0000-00000000c101",
+        external_event_id="evt-voice-1",
+        source="pagerduty",
+        severity="CRITICAL",
+        title="Voice ack",
+        message="m",
+        payload_json={"k": "v"},
+        status=models.IncidentStatus.OPEN,
+        matched_rule_id=None,
+        dedupe_key=None,
+        created_at=datetime(2026, 3, 20, 14, 0, 0),
+    )
+    notification = NotificationFixture(
+        id="00000000-0000-0000-0000-00000000c201",
+        incident_id=incident.id,
+        contact_id="00000000-0000-0000-0000-00000000c301",
+        channel=models.NotificationChannel.VOICE,
+        status=models.NotificationStatus.SENT,
+    )
+    fake_session = FakeVoiceSession([incident], [notification])
+    main.app.dependency_overrides[main.get_db] = lambda: fake_session
+    try:
+        first = client.post(
+            f"/dispatch/voice/callback/{notification.id}",
+            data={"Digits": "1"},
+        )
+        assert first.status_code == 200
+        first_ack_at = incident.acknowledged_at
+        assert incident.status == models.IncidentStatus.ACKNOWLEDGED
+        assert incident.acknowledged_by == notification.contact_id
+        assert notification.status == models.NotificationStatus.ANSWERED_VOICE
+        assert first_ack_at is not None
+
+        second = client.post(
+            f"/dispatch/voice/callback/{notification.id}",
+            data={"Digits": "1"},
+        )
+        assert second.status_code == 200
+        assert incident.status == models.IncidentStatus.ACKNOWLEDGED
+        assert incident.acknowledged_by == notification.contact_id
+        assert incident.acknowledged_at == first_ack_at
+        assert notification.status == models.NotificationStatus.ANSWERED_VOICE
+        assert sum(
+            1
+            for obj in fake_session.added_objects
+            if isinstance(obj, models.AuditLog) and obj.action == models.AuditAction.ACK_RECEIVED
+        ) == 1
     finally:
         main.app.dependency_overrides.pop(main.get_db, None)
 

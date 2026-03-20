@@ -981,6 +981,149 @@ def test_handle_escalation_valid_policy_keeps_fallback_behavior(monkeypatch):
         db.close()
 
 
+def test_dispatch_incident_reprocess_does_not_duplicate_notifications(monkeypatch):
+    prefix = f"pytest:{uuid.uuid4().hex}"
+    _, redis_client, worker = _fresh_worker(monkeypatch, prefix=prefix, dry_run="true")
+
+    _clear_prefix(redis_client.redis_conn, prefix)
+
+    queued = []
+    monkeypatch.setattr(
+        worker,
+        "_queue_channel_send",
+        lambda notification_id, trace_id, channel: queued.append((notification_id, trace_id, channel)),
+    )
+
+    from Seriema import models
+
+    db = worker.SessionLocal()
+    try:
+        group = models.Group(name=f"Dispatch-{uuid.uuid4().hex}")
+        contact = models.Contact(name="Dispatch Contact", email="dispatch@example.com")
+        incident = models.Incident(
+            external_event_id=f"evt-{uuid.uuid4().hex}",
+            source="pytest",
+            severity="HIGH",
+            title="dispatch-idempotent",
+            status=worker.IncidentStatus.OPEN,
+        )
+        db.add(group)
+        db.add(contact)
+        db.add(incident)
+        db.commit()
+        db.refresh(group)
+        db.refresh(contact)
+        db.refresh(incident)
+
+        db.add(models.GroupMember(group_id=group.id, contact_id=contact.id))
+        db.commit()
+
+        rule = models.Rule(
+            rule_name="dispatch-rule",
+            condition_json={"source": "pytest"},
+            recipient_group_id=group.id,
+            channels=["VOICE"],
+            active=True,
+            priority=10,
+        )
+        db.add(rule)
+        db.commit()
+        db.refresh(rule)
+
+        incident.matched_rule_id = rule.id
+        db.commit()
+    finally:
+        db.close()
+
+    worker.dispatch_incident(str(incident.id), "trace-dispatch-1")
+    worker.dispatch_incident(str(incident.id), "trace-dispatch-2")
+
+    db = worker.SessionLocal()
+    try:
+        notifications = db.query(models.Notification).filter(models.Notification.incident_id == incident.id).all()
+        assert len(notifications) == 1
+        assert str(notifications[0].contact_id) == str(contact.id)
+        assert notifications[0].channel == worker.NotificationChannel.VOICE
+        assert len(queued) == 2
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize(
+    "initial_status_name",
+    ["ACKNOWLEDGED", "RESOLVED"],
+)
+def test_handle_escalation_non_open_incident_is_noop(monkeypatch, initial_status_name):
+    prefix = f"pytest:{uuid.uuid4().hex}"
+    _, redis_client, worker = _fresh_worker(monkeypatch, prefix=prefix, dry_run="true")
+
+    _clear_prefix(redis_client.redis_conn, prefix)
+
+    initial_status = getattr(worker.IncidentStatus, initial_status_name)
+
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("fallback must not be queued for non-open incidents")
+
+    monkeypatch.setattr(worker, "_queue_channel_send", _fail_if_called)
+
+    from Seriema import models
+
+    db = worker.SessionLocal()
+    try:
+        group = models.Group(name=f"Escalation-{uuid.uuid4().hex}")
+        contact = models.Contact(name="Escalation Contact", email="escalation@example.com")
+        incident = models.Incident(
+            external_event_id=f"evt-{uuid.uuid4().hex}",
+            source="pytest",
+            severity="HIGH",
+            title="escalation-noop",
+            status=initial_status,
+        )
+        db.add(group)
+        db.add(contact)
+        db.add(incident)
+        db.commit()
+        db.refresh(group)
+        db.refresh(contact)
+        db.refresh(incident)
+
+        db.add(models.GroupMember(group_id=group.id, contact_id=contact.id))
+        db.commit()
+
+        rule = models.Rule(
+            rule_name="escalation-rule",
+            condition_json={"source": "pytest"},
+            recipient_group_id=group.id,
+            channels=["VOICE"],
+            fallback_policy_json={
+                "escalation_group_id": str(group.id),
+                "channels": ["VOICE"],
+            },
+        )
+        db.add(rule)
+        db.commit()
+        db.refresh(rule)
+
+        incident.matched_rule_id = rule.id
+        db.commit()
+    finally:
+        db.close()
+
+    result = worker._handle_escalation_impl(str(incident.id), "trace-non-open")
+
+    assert result is True
+    assert incident.status == initial_status
+
+    db = worker.SessionLocal()
+    try:
+        logs = db.query(models.AuditLog).filter(models.AuditLog.incident_id == incident.id).all()
+        assert logs == []
+        notifications = db.query(models.Notification).filter(models.Notification.incident_id == incident.id).all()
+        assert notifications == []
+    finally:
+        db.close()
+
+
 def test_stale_incident_sweeper_escalates_only_old_open_incidents(monkeypatch):
     prefix = f"pytest:{uuid.uuid4().hex}"
     _, redis_client, worker = _fresh_worker(
