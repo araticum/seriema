@@ -2,6 +2,7 @@ import importlib
 import json
 from enum import Enum
 import fnmatch
+from datetime import datetime, timedelta, timezone
 import sys
 import uuid
 from pathlib import Path
@@ -262,8 +263,27 @@ class _FakeQuery:
             if key is None:
                 continue
             obj_value = getattr(obj, key)
-            if self._normalize(obj_value) != self._normalize(right):
-                return False
+            operator_name = getattr(getattr(condition, "operator", None), "__name__", None)
+            if operator_name in {"eq", None}:
+                if self._normalize(obj_value) != self._normalize(right):
+                    return False
+                continue
+            if operator_name == "lt":
+                if not (obj_value < right):
+                    return False
+                continue
+            if operator_name == "le":
+                if not (obj_value <= right):
+                    return False
+                continue
+            if operator_name == "gt":
+                if not (obj_value > right):
+                    return False
+                continue
+            if operator_name == "ge":
+                if not (obj_value >= right):
+                    return False
+                continue
         return True
 
     def all(self):
@@ -704,3 +724,74 @@ def test_rate_limit_allows_first_send_and_blocks_second(monkeypatch):
     assert second_result["rate_limit"]["limit"] == 1
     assert second_result["rate_limit"]["count"] == 2
     assert redis_client.redis_conn.get(worker._channel_circuit_failure_key("VOICE")) is None
+
+
+def test_stale_incident_sweeper_escalates_only_old_open_incidents(monkeypatch):
+    prefix = f"pytest:{uuid.uuid4().hex}"
+    _, redis_client, worker = _fresh_worker(
+        monkeypatch,
+        prefix=prefix,
+        dry_run="true",
+    )
+
+    _clear_prefix(redis_client.redis_conn, prefix)
+
+    from Seriema import models
+
+    db = worker.SessionLocal()
+    try:
+        now = datetime.now(timezone.utc)
+        old_open = models.Incident(
+            external_event_id=f"evt-{uuid.uuid4().hex}",
+            source="pytest",
+            severity="LOW",
+            title="old-open",
+            status=worker.IncidentStatus.OPEN,
+            created_at=now - timedelta(minutes=45),
+        )
+        recent_open = models.Incident(
+            external_event_id=f"evt-{uuid.uuid4().hex}",
+            source="pytest",
+            severity="LOW",
+            title="recent-open",
+            status=worker.IncidentStatus.OPEN,
+            created_at=now - timedelta(minutes=10),
+        )
+        acknowledged = models.Incident(
+            external_event_id=f"evt-{uuid.uuid4().hex}",
+            source="pytest",
+            severity="LOW",
+            title="acknowledged",
+            status=worker.IncidentStatus.ACKNOWLEDGED,
+            created_at=now - timedelta(minutes=45),
+        )
+        db.add(old_open)
+        db.add(recent_open)
+        db.add(acknowledged)
+        db.commit()
+        db.refresh(old_open)
+        db.refresh(recent_open)
+        db.refresh(acknowledged)
+    finally:
+        db.close()
+
+    result = worker.stale_incident_sweeper()
+
+    db = worker.SessionLocal()
+    try:
+        db.refresh(old_open)
+        db.refresh(recent_open)
+        db.refresh(acknowledged)
+        assert old_open.status == worker.IncidentStatus.ESCALATED
+        assert recent_open.status == worker.IncidentStatus.OPEN
+        assert acknowledged.status == worker.IncidentStatus.ACKNOWLEDGED
+
+        logs = db.query(models.AuditLog).filter(models.AuditLog.incident_id == old_open.id).all()
+        assert any(
+            log.action == models.AuditAction.ESCALATED and log.details_json.get("reason") == "stale_sweeper"
+            for log in logs
+        )
+    finally:
+        db.close()
+
+    assert result["swept"] == 1

@@ -2,6 +2,7 @@ import json
 import time
 import uuid
 from datetime import datetime, timezone
+from datetime import timedelta
 
 from celery import Celery
 from celery.exceptions import Retry
@@ -27,6 +28,8 @@ from .config import (
     CELERY_TASK_SOFT_TIME_LIMIT,
     CELERY_TASK_TIME_LIMIT,
     METRICS_SNAPSHOT_INTERVAL_SECONDS,
+    INCIDENT_STALE_MINUTES,
+    INCIDENT_STALE_SWEEP_INTERVAL_SECONDS,
     OPS_ENDPOINT_MAX_LIMIT,
     REDIS_URL,
     METRICS_KEY,
@@ -69,6 +72,7 @@ celery_app.conf.update(
         "telegram_worker": {"queue": queue_name("telegram")},
         "email_worker": {"queue": queue_name("email")},
         "escalation_worker": {"queue": queue_name("escalation")},
+        "stale_incident_sweeper": {"queue": queue_name("escalation")},
         "replay_dlq": {"queue": queue_name(DLQ_QUEUE_NAME)},
         "prune_dlq": {"queue": queue_name(DLQ_QUEUE_NAME)},
     },
@@ -84,6 +88,10 @@ celery_app.conf.update(
         "dlq-prune": {
             "task": "prune_dlq",
             "schedule": DLQ_PRUNE_INTERVAL_SECONDS,
+        },
+        "stale-incident-sweeper": {
+            "task": "stale_incident_sweeper",
+            "schedule": INCIDENT_STALE_SWEEP_INTERVAL_SECONDS,
         },
     },
 )
@@ -185,6 +193,11 @@ def _channel_rate_limit_exceeded(
 
 def _metric_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _stale_cutoff(now: datetime | None = None) -> datetime:
+    current = now or datetime.now(timezone.utc)
+    return current - timedelta(minutes=INCIDENT_STALE_MINUTES)
 
 
 def _touch_metrics(fields: dict[str, int | str]) -> None:
@@ -740,6 +753,43 @@ def _handle_escalation_impl(incident_id: str, trace_id: str):
 
                 _queue_channel_send(str(notif.id), trace_id, notification_channel)
         return True
+    finally:
+        db.close()
+
+
+@celery_app.task(name="stale_incident_sweeper")
+def stale_incident_sweeper():
+    db: Session = SessionLocal()
+    swept = 0
+    try:
+        cutoff = _stale_cutoff()
+        stale_incidents = (
+            db.query(Incident)
+            .filter(
+                Incident.status == IncidentStatus.OPEN,
+                Incident.created_at < cutoff,
+            )
+            .all()
+        )
+
+        for incident in stale_incidents:
+            if incident.status != IncidentStatus.OPEN:
+                continue
+
+            incident.status = IncidentStatus.ESCALATED
+            db.add(
+                AuditLog(
+                    trace_id=str(uuid.uuid4()),
+                    incident_id=incident.id,
+                    action=AuditAction.ESCALATED,
+                    details_json={"reason": "stale_sweeper"},
+                )
+            )
+            swept += 1
+
+        if swept:
+            db.commit()
+        return {"swept": swept, "cutoff": cutoff.isoformat()}
     finally:
         db.close()
 
