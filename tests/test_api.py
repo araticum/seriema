@@ -782,6 +782,120 @@ def test_ops_dlq_replay_last_with_report(client, monkeypatch):
     assert payload["locked"] is True
 
 
+def test_ops_integration_status_empty(client, monkeypatch):
+    fake_session = FakeLifecycleSession([], audit_logs=[])
+    main.app.dependency_overrides[main.get_db] = lambda: fake_session
+    monkeypatch.setattr(main, "get_dlq_replay_report", lambda: {})
+    try:
+        response = client.get("/ops/integration/status")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["enums_ok"] is True
+        assert payload["fallback_contract_ok"] is True
+        assert payload["trace_propagation_signal"] is False
+        assert payload["duplicate_event_signal"] is False
+        assert payload["ack_flow_signal"] is False
+        assert payload["escalation_guard_signal"] is False
+        assert payload["dlq_reporting_signal"] is False
+        assert payload["evidence"]["trace_propagation"]["trace_logs"] == 0
+        assert payload["evidence"]["duplicate_event"]["duplicate_event_logs"] == 0
+        assert payload["evidence"]["ack_flow"]["ack_received_logs"] == 0
+        assert payload["evidence"]["dlq_reporting"]["report_status"] is None
+    finally:
+        main.app.dependency_overrides.pop(main.get_db, None)
+
+
+def test_ops_integration_status_with_minimal_signals(client, monkeypatch):
+    incident_ack = IncidentFixture(
+        id="00000000-0000-0000-0000-00000000e101",
+        external_event_id="evt-int-1",
+        source="prometheus",
+        severity="CRITICAL",
+        title="Ack incident",
+        message="m",
+        payload_json={"k": "v"},
+        status=models.IncidentStatus.ACKNOWLEDGED,
+        matched_rule_id=None,
+        dedupe_key=None,
+        created_at=datetime(2026, 3, 20, 15, 0, 0),
+        acknowledged_at=datetime(2026, 3, 20, 15, 1, 0),
+        acknowledged_by="alice",
+    )
+    incident_open = IncidentFixture(
+        id="00000000-0000-0000-0000-00000000e102",
+        external_event_id="evt-int-2",
+        source="grafana",
+        severity="WARN",
+        title="Escalation incident",
+        message="m",
+        payload_json={"k": "v"},
+        status=models.IncidentStatus.OPEN,
+        matched_rule_id=None,
+        dedupe_key=None,
+        created_at=datetime(2026, 3, 20, 16, 0, 0),
+    )
+    audit_logs = [
+        models.AuditLog(
+            id=uuid.UUID("00000000-0000-0000-0000-00000000e201"),
+            trace_id="trace-int-1",
+            incident_id=uuid.UUID(incident_ack.id),
+            action=models.AuditAction.EVENT_RECEIVED,
+            details_json={"kind": "event"},
+            created_at=datetime(2026, 3, 20, 15, 0, 30),
+        ),
+        models.AuditLog(
+            id=uuid.UUID("00000000-0000-0000-0000-00000000e202"),
+            trace_id="trace-int-2",
+            incident_id=uuid.UUID(incident_ack.id),
+            action=models.AuditAction.ACK_RECEIVED,
+            details_json={"channel": "api"},
+            created_at=datetime(2026, 3, 20, 15, 1, 0),
+        ),
+        models.AuditLog(
+            id=uuid.UUID("00000000-0000-0000-0000-00000000e203"),
+            trace_id="trace-int-3",
+            incident_id=uuid.UUID(incident_open.id),
+            action=models.AuditAction.ESCALATED,
+            details_json={"reason": "timeout"},
+            created_at=datetime(2026, 3, 20, 16, 5, 0),
+        ),
+        models.AuditLog(
+            id=uuid.UUID("00000000-0000-0000-0000-00000000e204"),
+            trace_id="trace-int-4",
+            incident_id=None,
+            action=models.AuditAction.DUPLICATED_EVENT,
+            details_json={"dedupe_key": "dup-1"},
+            created_at=datetime(2026, 3, 20, 16, 10, 0),
+        ),
+    ]
+    fake_session = FakeLifecycleSession([incident_ack, incident_open], audit_logs=audit_logs)
+    main.app.dependency_overrides[main.get_db] = lambda: fake_session
+    monkeypatch.setattr(main, "get_dlq_replay_report", lambda: {"status": "completed", "replayed": 1})
+    try:
+        response = client.get("/ops/integration/status")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["enums_ok"] is True
+        assert payload["fallback_contract_ok"] is True
+        assert payload["trace_propagation_signal"] is True
+        assert payload["duplicate_event_signal"] is True
+        assert payload["ack_flow_signal"] is True
+        assert payload["escalation_guard_signal"] is True
+        assert payload["dlq_reporting_signal"] is True
+        assert payload["evidence"]["trace_propagation"]["trace_logs"] == 4
+        assert payload["evidence"]["duplicate_event"]["duplicate_event_logs"] == 1
+        assert payload["evidence"]["ack_flow"]["ack_received_logs"] == 1
+        assert payload["evidence"]["ack_flow"]["acknowledged_incidents"] == 1
+        assert payload["evidence"]["escalation_guard"]["escalated_logs"] == 1
+        assert payload["evidence"]["escalation_guard"]["non_open_incidents"] == 1
+        assert payload["evidence"]["escalation_guard"]["non_open_escalated_incidents"] == 0
+        assert payload["evidence"]["dlq_reporting"]["report_status"] == "completed"
+    finally:
+        main.app.dependency_overrides.pop(main.get_db, None)
+
+
 def test_list_incidents_filters_and_pagination(client):
     incidents = [
         IncidentFixture(

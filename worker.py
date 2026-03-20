@@ -869,34 +869,50 @@ def stale_incident_sweeper():
     db: Session = SessionLocal()
     swept = 0
     try:
-        cutoff = _stale_cutoff()
-        stale_incidents = (
-            db.query(Incident)
-            .filter(
-                Incident.status == IncidentStatus.OPEN,
-                Incident.created_at < cutoff,
-            )
-            .all()
-        )
-
-        for incident in stale_incidents:
-            if incident.status != IncidentStatus.OPEN:
-                continue
-
-            incident.status = IncidentStatus.ESCALATED
-            db.add(
-                AuditLog(
-                    trace_id=str(uuid.uuid4()),
-                    incident_id=incident.id,
-                    action=AuditAction.ESCALATED,
-                    details_json={"reason": "stale_sweeper"},
+        try:
+            cutoff = _stale_cutoff()
+            stale_incidents = (
+                db.query(Incident)
+                .filter(
+                    Incident.status == IncidentStatus.OPEN,
+                    Incident.created_at < cutoff,
                 )
+                .all()
             )
-            swept += 1
 
-        if swept:
-            db.commit()
-        return {"swept": swept, "cutoff": cutoff.isoformat()}
+            for incident in stale_incidents:
+                if incident.status != IncidentStatus.OPEN:
+                    continue
+
+                incident.status = IncidentStatus.ESCALATED
+                db.add(
+                    AuditLog(
+                        trace_id=str(uuid.uuid4()),
+                        incident_id=incident.id,
+                        action=AuditAction.ESCALATED,
+                        details_json={"reason": "stale_sweeper"},
+                    )
+                )
+                swept += 1
+
+            if swept:
+                db.commit()
+            result = {"swept": swept, "cutoff": cutoff.isoformat()}
+            _touch_metrics(
+                {
+                    "last_run_at:stale_incident_sweeper": _metric_timestamp(),
+                    "last_status:stale_incident_sweeper": "ok",
+                }
+            )
+            return result
+        except Exception:
+            _touch_metrics(
+                {
+                    "last_run_at:stale_incident_sweeper": _metric_timestamp(),
+                    "last_status:stale_incident_sweeper": "error",
+                }
+            )
+            raise
     finally:
         db.close()
 
@@ -1032,19 +1048,52 @@ def replay_dlq(limit: int | None = None):
 
 @celery_app.task(name="queue_metrics_snapshot")
 def queue_metrics_snapshot():
-    return _snapshot_queue_backlog()
+    try:
+        result = _snapshot_queue_backlog()
+        _touch_metrics(
+            {
+                "last_run_at:queue_metrics_snapshot": _metric_timestamp(),
+                "last_status:queue_metrics_snapshot": "ok",
+            }
+        )
+        return result
+    except Exception:
+        _touch_metrics(
+            {
+                "last_run_at:queue_metrics_snapshot": _metric_timestamp(),
+                "last_status:queue_metrics_snapshot": "error",
+            }
+        )
+        raise
 
 
 @celery_app.task(name="prune_dlq")
 def prune_dlq(max_items: int | None = None):
-    limit = _bound_dlq_max_items(max_items)
-    current_size = redis_conn.llen(DLQ_REDIS_KEY)
-    if current_size <= limit:
-        _refresh_dlq_metric()
-        return {"removed": 0, "remaining": current_size, "max_items": limit}
+    try:
+        limit = _bound_dlq_max_items(max_items)
+        current_size = redis_conn.llen(DLQ_REDIS_KEY)
+        if current_size <= limit:
+            _refresh_dlq_metric()
+            result = {"removed": 0, "remaining": current_size, "max_items": limit}
+        else:
+            removed = current_size - limit
+            redis_conn.ltrim(DLQ_REDIS_KEY, -limit, -1)
+            remaining = redis_conn.llen(DLQ_REDIS_KEY)
+            _refresh_dlq_metric()
+            result = {"removed": removed, "remaining": remaining, "max_items": limit}
 
-    removed = current_size - limit
-    redis_conn.ltrim(DLQ_REDIS_KEY, -limit, -1)
-    remaining = redis_conn.llen(DLQ_REDIS_KEY)
-    _refresh_dlq_metric()
-    return {"removed": removed, "remaining": remaining, "max_items": limit}
+        _touch_metrics(
+            {
+                "last_run_at:prune_dlq": _metric_timestamp(),
+                "last_status:prune_dlq": "ok",
+            }
+        )
+        return result
+    except Exception:
+        _touch_metrics(
+            {
+                "last_run_at:prune_dlq": _metric_timestamp(),
+                "last_status:prune_dlq": "error",
+            }
+        )
+        raise

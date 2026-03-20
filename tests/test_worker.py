@@ -402,6 +402,8 @@ def test_queue_metrics_snapshot(monkeypatch):
     assert metrics[b"queue_backlog:voice"] == b"1"
     assert metrics[b"queue_backlog:telegram"] == b"3"
     assert metrics[b"queue_backlog:dlq"] == b"1"
+    assert metrics[b"last_status:queue_metrics_snapshot"] == b"ok"
+    assert b"last_run_at:queue_metrics_snapshot" in metrics
     assert b"updated_at" in metrics
 
 
@@ -585,6 +587,9 @@ def test_dlq_truncates_and_prunes_to_max_items(monkeypatch):
     assert result["remaining"] == 1
     assert result["max_items"] == 1
     assert redis_client.redis_conn.llen(worker.DLQ_REDIS_KEY) == 1
+    metrics = redis_client.redis_conn.hgetall(worker.METRICS_REDIS_KEY)
+    assert metrics[b"last_status:prune_dlq"] == b"ok"
+    assert b"last_run_at:prune_dlq" in metrics
 
 
 def test_replay_dlq_returns_locked_when_lock_is_held(monkeypatch):
@@ -1193,3 +1198,6 @@ def test_stale_incident_sweeper_escalates_only_old_open_incidents(monkeypatch):
         db.close()
 
     assert result["swept"] == 1
+    metrics = redis_client.redis_conn.hgetall(worker.METRICS_REDIS_KEY)
+    assert metrics[b"last_status:stale_incident_sweeper"] == b"ok"
+    assert b"last_run_at:stale_incident_sweeper" in metrics

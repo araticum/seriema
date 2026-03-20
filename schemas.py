@@ -251,6 +251,16 @@ class DLQReplayReportResponse(BaseModel):
     dry_run: bool = False
     locked: bool = False
 
+class OpsIntegrationStatusResponse(BaseModel):
+    enums_ok: bool
+    fallback_contract_ok: bool
+    trace_propagation_signal: bool
+    duplicate_event_signal: bool
+    ack_flow_signal: bool
+    escalation_guard_signal: bool
+    dlq_reporting_signal: bool
+    evidence: Dict[str, Any] = Field(default_factory=dict)
+
 class OperationalAlert(BaseModel):
     alert_type: str
     severity: Literal["info", "warn", "critical"]

@@ -976,6 +976,97 @@ def get_last_dlq_replay_report():
             normalized[key] = value
     return schemas.DLQReplayReportResponse(**normalized)
 
+def _evaluate_ops_integration_status(db: Session) -> schemas.OpsIntegrationStatusResponse:
+    evidence: dict[str, object] = {}
+
+    enums_ok = all(
+        hasattr(enum_cls, "__members__") and len(enum_cls.__members__) > 0
+        for enum_cls in (models.IncidentStatus, models.NotificationStatus, models.AuditAction)
+    )
+    evidence["enums"] = {
+        "incident_statuses": list(models.IncidentStatus.__members__.keys()),
+        "notification_statuses": list(models.NotificationStatus.__members__.keys()),
+        "audit_actions": list(models.AuditAction.__members__.keys()),
+    }
+
+    fallback_contract_ok = "fallback_policy_json" in schemas.RuleCreate.model_fields and "fallback_policy_json" in schemas.RuleUpdate.model_fields
+    evidence["fallback_contract"] = {
+        "rule_create": "fallback_policy_json" in schemas.RuleCreate.model_fields,
+        "rule_update": "fallback_policy_json" in schemas.RuleUpdate.model_fields,
+    }
+
+    incidents: list[models.Incident] = []
+    audit_logs: list[models.AuditLog] = []
+    try:
+        incidents = db.query(models.Incident).all()
+    except Exception as exc:
+        evidence["incidents_error"] = str(exc)
+    try:
+        audit_logs = db.query(models.AuditLog).all()
+    except Exception as exc:
+        evidence["audit_logs_error"] = str(exc)
+
+    trace_logs = [log for log in audit_logs if getattr(log, "trace_id", "")]
+    duplicate_events = [log for log in audit_logs if log.action == models.AuditAction.DUPLICATED_EVENT]
+    ack_logs = [log for log in audit_logs if log.action == models.AuditAction.ACK_RECEIVED]
+    acknowledged_incidents = [incident for incident in incidents if incident.status == models.IncidentStatus.ACKNOWLEDGED]
+    escalated_logs = [log for log in audit_logs if log.action == models.AuditAction.ESCALATED]
+    non_open_incidents = [incident for incident in incidents if incident.status != models.IncidentStatus.OPEN]
+    non_open_escalated = [
+        incident
+        for incident in non_open_incidents
+        if any(log.incident_id == incident.id for log in escalated_logs)
+    ]
+
+    try:
+        dlq_report = get_dlq_replay_report() or {}
+    except Exception as exc:
+        dlq_report = {}
+        evidence["dlq_reporting_error"] = str(exc)
+
+    dlq_status = str(dlq_report.get("status") or "").strip()
+
+    trace_propagation_signal = len(trace_logs) > 0
+    duplicate_event_signal = len(duplicate_events) > 0
+    ack_flow_signal = len(acknowledged_incidents) > 0 or len(ack_logs) > 0
+    escalation_guard_signal = len(escalated_logs) > 0 and len(non_open_escalated) == 0
+    dlq_reporting_signal = bool(dlq_status)
+
+    evidence.update(
+        {
+            "trace_propagation": {"trace_logs": len(trace_logs)},
+            "duplicate_event": {"duplicate_event_logs": len(duplicate_events)},
+            "ack_flow": {
+                "acknowledged_incidents": len(acknowledged_incidents),
+                "ack_received_logs": len(ack_logs),
+            },
+            "escalation_guard": {
+                "escalated_logs": len(escalated_logs),
+                "non_open_incidents": len(non_open_incidents),
+                "non_open_escalated_incidents": len(non_open_escalated),
+            },
+            "dlq_reporting": {
+                "report_status": dlq_status or None,
+                "has_report": bool(dlq_report),
+            },
+        }
+    )
+
+    return schemas.OpsIntegrationStatusResponse(
+        enums_ok=enums_ok,
+        fallback_contract_ok=fallback_contract_ok,
+        trace_propagation_signal=trace_propagation_signal,
+        duplicate_event_signal=duplicate_event_signal,
+        ack_flow_signal=ack_flow_signal,
+        escalation_guard_signal=escalation_guard_signal,
+        dlq_reporting_signal=dlq_reporting_signal,
+        evidence=evidence,
+    )
+
+@app.get("/ops/integration/status", response_model=schemas.OpsIntegrationStatusResponse)
+def get_ops_integration_status(db: Session = Depends(get_db)):
+    return _evaluate_ops_integration_status(db)
+
 @app.get("/dispatch/voice/twiml/{notification_id}")
 @app.post("/dispatch/voice/twiml/{notification_id}")
 def generate_twiml(notification_id: str, db: Session = Depends(get_db)):
