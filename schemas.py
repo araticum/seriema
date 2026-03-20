@@ -52,6 +52,23 @@ class RuleCreate(BaseModel):
 class RuleResponse(RuleCreate):
     id: uuid.UUID
 
+class RuleUpdate(BaseModel):
+    rule_name: Optional[str] = None
+    condition_json: Optional[Dict[str, Any]] = None
+    recipient_group_id: Optional[uuid.UUID] = None
+    channels: Optional[List[str]] = None
+    active: Optional[bool] = None
+    priority: Optional[int] = None
+    requires_ack: Optional[bool] = None
+    ack_deadline: Optional[int] = None
+    fallback_policy_json: Optional[Dict[str, Any]] = None
+
+class RuleListResponse(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    items: List[RuleResponse]
+
 class EventIngestResponse(BaseModel):
     status: str
     incident_id: Optional[uuid.UUID] = None

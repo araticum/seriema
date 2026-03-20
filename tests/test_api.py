@@ -214,6 +214,101 @@ class FakeIncidentSession(FakeSession):
         return FakeIncidentQuery(self._incidents, count_mode=True)
 
 
+@dataclass
+class RuleFixture:
+    id: str
+    rule_name: str
+    condition_json: dict
+    recipient_group_id: str
+    channels: list[str]
+    active: bool
+    priority: int
+    requires_ack: bool
+    ack_deadline: int | None
+    fallback_policy_json: dict | None
+
+
+@dataclass
+class GroupFixture:
+    id: str
+    name: str
+    description: str | None = None
+
+
+class FakeRuleQuery:
+    def __init__(self, items):
+        self._items = list(items)
+        self._filters = []
+        self._offset = 0
+        self._limit = None
+        self._ordered = False
+
+    def filter(self, *criteria):
+        self._filters.extend(criteria)
+        return self
+
+    def order_by(self, *criteria):
+        self._ordered = True
+        return self
+
+    def offset(self, value):
+        self._offset = value
+        return self
+
+    def limit(self, value):
+        self._limit = value
+        return self
+
+    def _matches(self, item):
+        for criterion in self._filters:
+            if isinstance(criterion, BinaryExpression):
+                field = getattr(criterion.left, "key", None) or getattr(criterion.left, "name", None)
+                expected = getattr(criterion.right, "value", None)
+                if expected is None:
+                    right_repr = str(criterion.right).strip().lower()
+                    if right_repr == "true":
+                        expected = True
+                    elif right_repr == "false":
+                        expected = False
+                if field is None:
+                    continue
+                actual = getattr(item, field)
+                if actual != expected and str(actual) != str(expected):
+                    return False
+        return True
+
+    def _filtered(self):
+        items = [item for item in self._items if self._matches(item)]
+        if self._ordered and items and hasattr(items[0], "priority"):
+            items.sort(key=lambda item: (item.priority, item.rule_name, item.id))
+        if self._offset:
+            items = items[self._offset :]
+        if self._limit is not None:
+            items = items[: self._limit]
+        return items
+
+    def all(self):
+        return self._filtered()
+
+    def first(self):
+        items = self._filtered()
+        return items[0] if items else None
+
+
+class FakeRuleSession(FakeSession):
+    def __init__(self, rules, groups):
+        super().__init__(queries=[])
+        self._rules = list(rules)
+        self._groups = list(groups)
+
+    def query(self, *args, **kwargs):
+        if len(args) == 1 and args[0] is models.Rule:
+            return FakeRuleQuery(self._rules)
+        if len(args) == 1 and args[0] is models.Group:
+            return FakeRuleQuery(self._groups)
+        raise AssertionError(f"Unexpected query call: {args}")
+
+
 @pytest.fixture(autouse=True)
 def reset_overrides():
     main.app.dependency_overrides = {}
@@ -620,3 +715,145 @@ def test_list_incidents_pagination_and_order(client):
 def test_list_incidents_limit_above_max(client):
     response = client.get(f"/incidents?limit={main.OPS_ENDPOINT_MAX_LIMIT + 1}")
     assert response.status_code == 422
+
+
+def test_list_rules_filters_and_pagination(client):
+    group_a = GroupFixture(id="00000000-0000-0000-0000-00000000a001", name="group-a")
+    group_b = GroupFixture(id="00000000-0000-0000-0000-00000000b001", name="group-b")
+    rules = [
+        RuleFixture(
+            id="00000000-0000-0000-0000-000000000101",
+            rule_name="rule-1",
+            condition_json={"source": "prometheus"},
+            recipient_group_id=group_a.id,
+            channels=["voice"],
+            active=True,
+            priority=20,
+            requires_ack=True,
+            ack_deadline=300,
+            fallback_policy_json=None,
+        ),
+        RuleFixture(
+            id="00000000-0000-0000-0000-000000000102",
+            rule_name="rule-2",
+            condition_json={"source": "grafana"},
+            recipient_group_id=group_a.id,
+            channels=["telegram"],
+            active=True,
+            priority=10,
+            requires_ack=False,
+            ack_deadline=None,
+            fallback_policy_json=None,
+        ),
+        RuleFixture(
+            id="00000000-0000-0000-0000-000000000103",
+            rule_name="rule-3",
+            condition_json={"source": "grafana"},
+            recipient_group_id=group_b.id,
+            channels=["email"],
+            active=False,
+            priority=30,
+            requires_ack=False,
+            ack_deadline=None,
+            fallback_policy_json=None,
+        ),
+    ]
+    fake_session = FakeRuleSession(rules, [group_a, group_b])
+    main.app.dependency_overrides[main.get_db] = lambda: fake_session
+
+    response = client.get(f"/rules?active=true&recipient_group_id={group_a.id}&limit=1&offset=0")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 2
+    assert payload["limit"] == 1
+    assert payload["offset"] == 0
+    assert len(payload["items"]) == 1
+    assert payload["items"][0]["id"] == "00000000-0000-0000-0000-000000000102"
+    assert payload["items"][0]["priority"] == 10
+
+
+def test_list_rules_limit_above_max(client):
+    response = client.get(f"/rules?limit={main.OPS_ENDPOINT_MAX_LIMIT + 1}")
+    assert response.status_code == 400
+
+
+def test_update_rule_and_toggle(client):
+    group_a = GroupFixture(id="00000000-0000-0000-0000-00000000c001", name="group-c")
+    group_b = GroupFixture(id="00000000-0000-0000-0000-00000000d001", name="group-d")
+    rule = RuleFixture(
+        id="00000000-0000-0000-0000-000000000201",
+        rule_name="rule-old",
+        condition_json={"source": "old"},
+        recipient_group_id=group_a.id,
+        channels=["voice"],
+        active=True,
+        priority=50,
+        requires_ack=False,
+        ack_deadline=None,
+        fallback_policy_json=None,
+    )
+    fake_session = FakeRuleSession([rule], [group_a, group_b])
+    main.app.dependency_overrides[main.get_db] = lambda: fake_session
+
+    response = client.patch(
+        f"/rules/{rule.id}",
+        json={
+            "rule_name": "rule-new",
+            "recipient_group_id": group_b.id,
+            "channels": ["telegram", "email"],
+            "active": False,
+            "priority": 5,
+            "requires_ack": True,
+            "ack_deadline": 600,
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["rule_name"] == "rule-new"
+    assert payload["recipient_group_id"] == group_b.id
+    assert payload["channels"] == ["telegram", "email"]
+    assert payload["active"] is False
+    assert payload["priority"] == 5
+    assert payload["requires_ack"] is True
+    assert payload["ack_deadline"] == 600
+
+    toggled = client.post(f"/rules/{rule.id}/toggle")
+    assert toggled.status_code == 200
+    assert toggled.json()["active"] is True
+
+
+def test_update_rule_errors(client):
+    group = GroupFixture(id="00000000-0000-0000-0000-00000000e001", name="group-e")
+    rule = RuleFixture(
+        id="00000000-0000-0000-0000-000000000301",
+        rule_name="rule",
+        condition_json={"source": "x"},
+        recipient_group_id=group.id,
+        channels=["voice"],
+        active=True,
+        priority=10,
+        requires_ack=False,
+        ack_deadline=None,
+        fallback_policy_json=None,
+    )
+    fake_session = FakeRuleSession([rule], [group])
+    main.app.dependency_overrides[main.get_db] = lambda: fake_session
+
+    invalid_id = client.patch("/rules/not-a-uuid", json={"rule_name": "x"})
+    assert invalid_id.status_code == 400
+
+    not_found = client.patch("/rules/00000000-0000-0000-0000-000000000999", json={"rule_name": "x"})
+    assert not_found.status_code == 404
+
+    missing_group = client.patch(
+        f"/rules/{rule.id}",
+        json={"recipient_group_id": "00000000-0000-0000-0000-00000000ffff"},
+    )
+    assert missing_group.status_code == 404
+
+    no_fields = client.patch(f"/rules/{rule.id}", json={})
+    assert no_fields.status_code == 400
+
+    toggle_not_found = client.post("/rules/00000000-0000-0000-0000-000000000999/toggle")
+    assert toggle_not_found.status_code == 404

@@ -61,6 +61,20 @@ def _serialize_audit(audit: models.AuditLog) -> schemas.AuditLogResponse:
         created_at=audit.created_at,
     )
 
+def _serialize_rule(rule: models.Rule) -> schemas.RuleResponse:
+    return schemas.RuleResponse(
+        id=rule.id,
+        rule_name=rule.rule_name,
+        condition_json=rule.condition_json,
+        recipient_group_id=rule.recipient_group_id,
+        channels=rule.channels,
+        active=rule.active,
+        priority=rule.priority,
+        requires_ack=rule.requires_ack,
+        ack_deadline=rule.ack_deadline,
+        fallback_policy_json=rule.fallback_policy_json,
+    )
+
 def _get_or_create_trace_id(db: Session, incident_id: uuid.UUID) -> str:
     first_log = (
         db.query(models.AuditLog)
@@ -454,7 +468,96 @@ def create_rule(rule: schemas.RuleCreate, db: Session = Depends(get_db)):
     db.add(db_rule)
     db.commit()
     db.refresh(db_rule)
-    return db_rule
+    return _serialize_rule(db_rule)
+
+@app.get("/rules", response_model=schemas.RuleListResponse)
+def list_rules(
+    active: bool | None = Query(default=None),
+    recipient_group_id: uuid.UUID | None = Query(default=None),
+    limit: int = Query(20, ge=1),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    _validate_ops_limit(limit)
+
+    query = db.query(models.Rule)
+    if active is not None:
+        query = query.filter(models.Rule.active == active)
+    if recipient_group_id is not None:
+        query = query.filter(models.Rule.recipient_group_id == recipient_group_id)
+
+    rules = query.order_by(models.Rule.priority.asc(), models.Rule.rule_name.asc(), models.Rule.id.asc()).all()
+    total = len(rules)
+    items = rules[offset : offset + limit]
+
+    return schemas.RuleListResponse(
+        total=total,
+        limit=limit,
+        offset=offset,
+        items=[_serialize_rule(rule) for rule in items],
+    )
+
+@app.patch("/rules/{rule_id}", response_model=schemas.RuleResponse)
+def update_rule(
+    rule_id: str,
+    rule_update: schemas.RuleUpdate,
+    db: Session = Depends(get_db),
+):
+    try:
+        rule_uuid = uuid.UUID(rule_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid rule id") from exc
+
+    db_rule = db.query(models.Rule).filter(models.Rule.id == rule_uuid).first()
+    if not db_rule:
+        raise HTTPException(status_code=404, detail="Rule not found")
+
+    update_data = {
+        "rule_name": rule_update.rule_name,
+        "condition_json": rule_update.condition_json,
+        "recipient_group_id": rule_update.recipient_group_id,
+        "channels": rule_update.channels,
+        "active": rule_update.active,
+        "priority": rule_update.priority,
+        "requires_ack": rule_update.requires_ack,
+        "ack_deadline": rule_update.ack_deadline,
+        "fallback_policy_json": rule_update.fallback_policy_json,
+    }
+    provided = {key: value for key, value in update_data.items() if value is not None}
+    if not provided:
+        raise HTTPException(status_code=400, detail="No rule fields provided")
+
+    if rule_update.recipient_group_id is not None:
+        group = (
+            db.query(models.Group)
+            .filter(models.Group.id == rule_update.recipient_group_id)
+            .first()
+        )
+        if not group:
+            raise HTTPException(status_code=404, detail="Group not found")
+
+    for key, value in provided.items():
+        setattr(db_rule, key, value)
+
+    db.commit()
+    db.refresh(db_rule)
+    return _serialize_rule(db_rule)
+
+@app.post("/rules/{rule_id}/toggle", response_model=schemas.RuleResponse)
+def toggle_rule(rule_id: str, db: Session = Depends(get_db)):
+    try:
+        rule_uuid = uuid.UUID(rule_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid rule id") from exc
+
+    db_rule = db.query(models.Rule).filter(models.Rule.id == rule_uuid).first()
+    if not db_rule:
+        raise HTTPException(status_code=404, detail="Rule not found")
+
+    db_rule.active = not bool(db_rule.active)
+    db.commit()
+    db.refresh(db_rule)
+    return _serialize_rule(db_rule)
 
 @app.post("/groups", response_model=schemas.GroupResponse)
 def create_group(group: schemas.GroupCreate, db: Session = Depends(get_db)):
