@@ -47,6 +47,7 @@ SERIEMA_QUEUE_PREFIX=queue:seriema
 SERIEMA_OPS_MAX_LIMIT=100
 SERIEMA_ADMIN_TOKEN=change-me
 VOICE_WEBHOOK_SECRET=change-me
+VOICE_PRERECORDED_AUDIO_URL=https://cdn.example.com/incident-alert.mp3
 ```
 
 Optional operational knobs:
@@ -125,6 +126,12 @@ powershell -ExecutionPolicy Bypass -File scripts/smoke_e2e_handoff.ps1
 - `GET /incidents/{incident_id}/timeline`
 - `POST /incidents/{incident_id}/ack`
 - `POST /incidents/{incident_id}/resolve`
+
+### Voice
+
+- `GET|POST /dispatch/voice/twiml/{notification_id}`
+- `GET|POST /dispatch/voice/twiml/prerecorded/{notification_id}`
+- `POST /dispatch/voice/callback/{notification_id}`
 
 ### Rules
 

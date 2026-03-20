@@ -24,6 +24,7 @@ from .config import (
     DLQ_QUEUE_NAME,
     METRICS_KEY,
     OPS_ENDPOINT_MAX_LIMIT,
+    VOICE_PRERECORDED_AUDIO_URL,
     VOICE_WEBHOOK_MAX_SKEW_SECONDS,
     queue_name,
     prefixed_redis_key,
@@ -1428,6 +1429,48 @@ def generate_twiml(notification_id: str, db: Session = Depends(get_db)):
     db.add(audit)
     db.commit()
 
+    return Response(content=twiml_response, media_type="application/xml")
+
+@app.get("/dispatch/voice/twiml/prerecorded/{notification_id}")
+@app.post("/dispatch/voice/twiml/prerecorded/{notification_id}")
+def generate_prerecorded_twiml(notification_id: str, db: Session = Depends(get_db)):
+    if not VOICE_PRERECORDED_AUDIO_URL:
+        raise HTTPException(status_code=503, detail="Pre-recorded audio URL is not configured")
+
+    try:
+        notification_uuid = uuid.UUID(notification_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid notification id") from exc
+
+    notification = db.query(models.Notification).filter(models.Notification.id == notification_uuid).first()
+    if not notification:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    incident = db.query(models.Incident).filter(models.Incident.id == notification.incident_id).first()
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    trace_id = _get_or_create_trace_id(db, incident.id)
+    twiml_response = f'''<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Play>{VOICE_PRERECORDED_AUDIO_URL}</Play>
+    <Gather numDigits="1" action="{APP_BASE_URL}/dispatch/voice/callback/{notification_id}" method="POST" />
+    <Say language="pt-BR">Se necessário, repita a ligação com a equipe de plantão.</Say>
+</Response>'''
+
+    db.add(
+        models.AuditLog(
+            trace_id=trace_id,
+            incident_id=incident.id,
+            action=models.AuditAction.TWIML_GENERATED,
+            details_json={
+                "notification_id": notification_id,
+                "mode": "pre_recorded",
+                "audio_url": VOICE_PRERECORDED_AUDIO_URL,
+            },
+        )
+    )
+    db.commit()
     return Response(content=twiml_response, media_type="application/xml")
 
 @app.post("/dispatch/voice/callback/{notification_id}")

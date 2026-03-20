@@ -32,6 +32,7 @@ REDIS_KEY_PREFIX = os.getenv("SERIEMA_REDIS_KEY_PREFIX", "seriema")
 QUEUE_PREFIX = os.getenv("SERIEMA_QUEUE_PREFIX", "queue:seriema")
 
 APP_BASE_URL = os.getenv("APP_BASE_URL", "https://api.event-saas.com")
+VOICE_PRERECORDED_AUDIO_URL = os.getenv("VOICE_PRERECORDED_AUDIO_URL", "")
 
 CELERY_TASK_MAX_RETRIES = int(os.getenv("SERIEMA_TASK_MAX_RETRIES", "5"))
 CELERY_TASK_RETRY_BACKOFF = int(os.getenv("SERIEMA_TASK_RETRY_BACKOFF", "2"))

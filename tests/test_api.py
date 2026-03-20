@@ -1632,6 +1632,59 @@ def test_voice_callback_ack_is_idempotent(client):
         main.app.dependency_overrides.pop(main.get_db, None)
 
 
+def test_generate_prerecorded_twiml_success(client):
+    incident = IncidentFixture(
+        id="00000000-0000-0000-0000-00000000c111",
+        external_event_id="evt-voice-pre-1",
+        source="pagerduty",
+        severity="CRITICAL",
+        title="Voice pre-recorded",
+        message="m",
+        payload_json={"k": "v"},
+        status=models.IncidentStatus.OPEN,
+        matched_rule_id=None,
+        dedupe_key=None,
+        created_at=datetime(2026, 3, 20, 14, 30, 0),
+    )
+    notification = NotificationFixture(
+        id="00000000-0000-0000-0000-00000000c211",
+        incident_id=incident.id,
+        contact_id="00000000-0000-0000-0000-00000000c311",
+        channel=models.NotificationChannel.VOICE,
+        status=models.NotificationStatus.SENT,
+    )
+    fake_session = FakeVoiceSession([incident], [notification])
+    main.app.dependency_overrides[main.get_db] = lambda: fake_session
+    original_audio_url = main.VOICE_PRERECORDED_AUDIO_URL
+    main.VOICE_PRERECORDED_AUDIO_URL = "https://cdn.example.com/incident-alert.mp3"
+    try:
+        response = client.get(f"/dispatch/voice/twiml/prerecorded/{notification.id}")
+        assert response.status_code == 200
+        payload = response.text
+        assert "<Play>https://cdn.example.com/incident-alert.mp3</Play>" in payload
+        assert f'action="{main.APP_BASE_URL}/dispatch/voice/callback/{notification.id}"' in payload
+        assert any(
+            isinstance(obj, models.AuditLog)
+            and obj.action == models.AuditAction.TWIML_GENERATED
+            and obj.details_json.get("mode") == "pre_recorded"
+            for obj in fake_session.added_objects
+        )
+    finally:
+        main.VOICE_PRERECORDED_AUDIO_URL = original_audio_url
+        main.app.dependency_overrides.pop(main.get_db, None)
+
+
+def test_generate_prerecorded_twiml_requires_audio_url(client):
+    original_audio_url = main.VOICE_PRERECORDED_AUDIO_URL
+    main.VOICE_PRERECORDED_AUDIO_URL = ""
+    try:
+        response = client.get("/dispatch/voice/twiml/prerecorded/00000000-0000-0000-0000-00000000c211")
+        assert response.status_code == 503
+        assert response.json()["detail"] == "Pre-recorded audio URL is not configured"
+    finally:
+        main.VOICE_PRERECORDED_AUDIO_URL = original_audio_url
+
+
 def test_get_incident_timeline_success(client):
     incident_id = uuid.UUID("00000000-0000-0000-0000-00000000d101")
     incident = IncidentFixture(
