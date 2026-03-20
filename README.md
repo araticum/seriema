@@ -48,6 +48,11 @@ SERIEMA_OPS_MAX_LIMIT=100
 SERIEMA_ADMIN_TOKEN=change-me
 VOICE_WEBHOOK_SECRET=change-me
 VOICE_PRERECORDED_AUDIO_URL=https://cdn.example.com/incident-alert.mp3
+VOICE_PROVIDER=mock
+VOICE_TWIML_MODE=dynamic
+TWILIO_ACCOUNT_SID=
+TWILIO_AUTH_TOKEN=
+TWILIO_FROM_NUMBER=
 ```
 
 Optional operational knobs:
@@ -132,6 +137,12 @@ powershell -ExecutionPolicy Bypass -File scripts/smoke_e2e_handoff.ps1
 - `GET|POST /dispatch/voice/twiml/{notification_id}`
 - `GET|POST /dispatch/voice/twiml/prerecorded/{notification_id}`
 - `POST /dispatch/voice/callback/{notification_id}`
+
+Para Twilio:
+
+- defina `VOICE_PROVIDER=twilio`
+- configure `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`
+- opcionalmente use `VOICE_TWIML_MODE=prerecorded` com `VOICE_PRERECORDED_AUDIO_URL`
 
 ### Rules
 

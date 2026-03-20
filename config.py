@@ -33,6 +33,11 @@ QUEUE_PREFIX = os.getenv("SERIEMA_QUEUE_PREFIX", "queue:seriema")
 
 APP_BASE_URL = os.getenv("APP_BASE_URL", "https://api.event-saas.com")
 VOICE_PRERECORDED_AUDIO_URL = os.getenv("VOICE_PRERECORDED_AUDIO_URL", "")
+VOICE_TWIML_MODE = os.getenv("VOICE_TWIML_MODE", "dynamic").lower()
+VOICE_PROVIDER = os.getenv("VOICE_PROVIDER", "mock").lower()
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
+TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER", "")
 
 CELERY_TASK_MAX_RETRIES = int(os.getenv("SERIEMA_TASK_MAX_RETRIES", "5"))
 CELERY_TASK_RETRY_BACKOFF = int(os.getenv("SERIEMA_TASK_RETRY_BACKOFF", "2"))

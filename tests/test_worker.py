@@ -862,6 +862,66 @@ def test_rate_limit_allows_first_send_and_blocks_second(monkeypatch):
     assert redis_client.redis_conn.get(worker._channel_circuit_failure_key("VOICE")) is None
 
 
+def test_voice_twiml_url_prerecorded_mode(monkeypatch):
+    prefix = f"pytest:{uuid.uuid4().hex}"
+    _, _, worker = _fresh_worker(monkeypatch, prefix=prefix, dry_run="true")
+
+    monkeypatch.setattr(worker, "APP_BASE_URL", "https://seriema.example.com", raising=False)
+    monkeypatch.setattr(worker, "VOICE_TWIML_MODE", "prerecorded", raising=False)
+    monkeypatch.setattr(worker, "VOICE_PRERECORDED_AUDIO_URL", "https://cdn.example.com/alert.mp3", raising=False)
+
+    url = worker._voice_twiml_url("00000000-0000-0000-0000-00000000abcd")
+    assert url.endswith("/dispatch/voice/twiml/prerecorded/00000000-0000-0000-0000-00000000abcd")
+
+
+def test_send_voice_call_twilio_sets_external_provider_id(monkeypatch):
+    prefix = f"pytest:{uuid.uuid4().hex}"
+    _, redis_client, worker = _fresh_worker(monkeypatch, prefix=prefix, dry_run="true")
+
+    _clear_prefix(redis_client.redis_conn, prefix)
+
+    monkeypatch.setattr(worker, "VOICE_PROVIDER", "twilio", raising=False)
+    monkeypatch.setattr(worker, "APP_BASE_URL", "https://seriema.example.com", raising=False)
+    monkeypatch.setattr(worker, "VOICE_TWIML_MODE", "dynamic", raising=False)
+
+    captured = {}
+
+    def _fake_twilio(phone, twiml_url):
+        captured["phone"] = phone
+        captured["twiml_url"] = twiml_url
+        return "CA00000000000000000000000000000001"
+
+    monkeypatch.setattr(worker, "_call_twilio_voice", _fake_twilio, raising=False)
+
+    db = worker.SessionLocal()
+    try:
+        contact = worker.Contact(name="Twilio Contact", phone="+5511999999999")
+        db.add(contact)
+        db.commit()
+        db.refresh(contact)
+
+        notification = worker.Notification(
+            incident_id=uuid.uuid4(),
+            contact_id=contact.id,
+            channel=worker.NotificationChannel.VOICE,
+            status=worker.NotificationStatus.PENDING,
+        )
+        db.add(notification)
+        db.commit()
+        db.refresh(notification)
+
+        result = worker._send_voice_call_impl(str(notification.id), "trace-twilio")
+        assert result["status"] == "sent"
+        assert result["channel"] == "VOICE"
+
+        db.refresh(notification)
+        assert notification.external_provider_id == "CA00000000000000000000000000000001"
+        assert captured["phone"] == "+5511999999999"
+        assert captured["twiml_url"].endswith(f"/dispatch/voice/twiml/{notification.id}")
+    finally:
+        db.close()
+
+
 def test_handle_escalation_invalid_fallback_policy_records_failed_audit(monkeypatch):
     prefix = f"pytest:{uuid.uuid4().hex}"
     _, redis_client, worker = _fresh_worker(monkeypatch, prefix=prefix, dry_run="true")

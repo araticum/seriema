@@ -1,8 +1,11 @@
 import json
+import base64
 import time
 import uuid
 from datetime import datetime, timezone
 from datetime import timedelta
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from celery import Celery
 from celery.exceptions import Retry
@@ -34,6 +37,13 @@ from .config import (
     REDIS_URL,
     METRICS_KEY,
     METRICS_TTL_SECONDS,
+    APP_BASE_URL,
+    VOICE_PRERECORDED_AUDIO_URL,
+    VOICE_TWIML_MODE,
+    VOICE_PROVIDER,
+    TWILIO_ACCOUNT_SID,
+    TWILIO_AUTH_TOKEN,
+    TWILIO_FROM_NUMBER,
     queue_name,
     prefixed_redis_key,
 )
@@ -41,6 +51,7 @@ from .database import SessionLocal
 from .models import (
     AuditAction,
     AuditLog,
+    Contact,
     GroupMember,
     Incident,
     IncidentStatus,
@@ -100,6 +111,58 @@ celery_app.conf.update(
 
 def _notification_channel_value(channel: NotificationChannel | str) -> str:
     return channel.value if isinstance(channel, NotificationChannel) else str(channel)
+
+
+def _voice_twiml_url(notification_id: str) -> str:
+    mode = (VOICE_TWIML_MODE or "dynamic").strip().lower()
+    if mode == "prerecorded" and VOICE_PRERECORDED_AUDIO_URL:
+        return f"{APP_BASE_URL}/dispatch/voice/twiml/prerecorded/{notification_id}"
+    return f"{APP_BASE_URL}/dispatch/voice/twiml/{notification_id}"
+
+
+def _call_twilio_voice(contact_phone: str, twiml_url: str) -> str:
+    if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER]):
+        raise RuntimeError("Twilio credentials are not configured")
+
+    endpoint = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Calls.json"
+    payload = urlencode(
+        {
+            "To": contact_phone,
+            "From": TWILIO_FROM_NUMBER,
+            "Url": twiml_url,
+            "Method": "POST",
+        }
+    ).encode("utf-8")
+    basic_auth = base64.b64encode(f"{TWILIO_ACCOUNT_SID}:{TWILIO_AUTH_TOKEN}".encode("utf-8")).decode("ascii")
+    request = Request(
+        endpoint,
+        data=payload,
+        method="POST",
+        headers={
+            "Authorization": f"Basic {basic_auth}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+    )
+
+    with urlopen(request, timeout=15) as response:
+        body = response.read().decode("utf-8")
+        parsed = json.loads(body)
+        sid = parsed.get("sid")
+        if not sid:
+            raise RuntimeError("Twilio response did not include call sid")
+        return str(sid)
+
+
+def _dispatch_voice_provider(db: Session, notification: Notification) -> str | None:
+    provider = (VOICE_PROVIDER or "mock").strip().lower()
+    if provider != "twilio":
+        return None
+
+    contact = db.query(Contact).filter(Contact.id == notification.contact_id).first()
+    if not contact or not contact.phone:
+        raise RuntimeError("Contact phone is not available for voice dispatch")
+
+    return _call_twilio_voice(str(contact.phone), _voice_twiml_url(str(notification.id)))
 
 
 def _notification_is_terminal(notification: Notification) -> bool:
@@ -611,7 +674,11 @@ def _send_notification_channel_impl(
                     "rate_limit": rate_limit,
                 }
 
-        sent = _mark_notification_sent(db, notification_id, trace_id, channel_name)
+        provider_id = None
+        if channel_name == "VOICE":
+            provider_id = _dispatch_voice_provider(db, notification)
+
+        sent = _mark_notification_sent(db, notification_id, trace_id, channel_name, provider_id=provider_id)
         if sent:
             return {
                 "status": "sent",
