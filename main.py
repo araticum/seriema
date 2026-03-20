@@ -597,21 +597,170 @@ def simulate_rule(
 
     return _simulate_rule(db_rule, payload)
 
+def _load_contact_or_404(contact_id: str, db: Session) -> tuple[uuid.UUID, models.Contact]:
+    try:
+        contact_uuid = uuid.UUID(contact_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid contact id") from exc
+
+    contact = db.query(models.Contact).filter(models.Contact.id == contact_uuid).first()
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    return contact_uuid, contact
+
+def _load_group_or_404(group_id: str, db: Session) -> tuple[uuid.UUID, models.Group]:
+    try:
+        group_uuid = uuid.UUID(group_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid group id") from exc
+
+    group = db.query(models.Group).filter(models.Group.id == group_uuid).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    return group_uuid, group
+
+def _has_any_rows(query) -> bool:
+    try:
+        return query.first() is not None
+    except Exception:
+        return False
+
+def _serialize_contact(contact: models.Contact) -> schemas.ContactResponse:
+    return schemas.ContactResponse(
+        id=contact.id,
+        name=contact.name,
+        email=contact.email,
+        phone=contact.phone,
+        whatsapp=contact.whatsapp,
+        telegram_id=contact.telegram_id,
+    )
+
+def _serialize_group(group: models.Group) -> schemas.GroupResponse:
+    return schemas.GroupResponse(
+        id=group.id,
+        name=group.name,
+        description=group.description,
+    )
+
+def _delete_contact_guard(db: Session, contact_uuid: uuid.UUID) -> None:
+    if _has_any_rows(db.query(models.Notification).filter(models.Notification.contact_id == contact_uuid)):
+        raise HTTPException(status_code=409, detail="Contact has related notifications")
+    if _has_any_rows(db.query(models.GroupMember).filter(models.GroupMember.contact_id == contact_uuid)):
+        raise HTTPException(status_code=409, detail="Contact has related group members")
+
+def _delete_group_guard(db: Session, group_uuid: uuid.UUID) -> None:
+    if _has_any_rows(db.query(models.Rule).filter(models.Rule.recipient_group_id == group_uuid)):
+        raise HTTPException(status_code=409, detail="Group has related rules")
+    if _has_any_rows(db.query(models.GroupMember).filter(models.GroupMember.group_id == group_uuid)):
+        raise HTTPException(status_code=409, detail="Group has related members")
+
 @app.post("/groups", response_model=schemas.GroupResponse)
 def create_group(group: schemas.GroupCreate, db: Session = Depends(get_db)):
-    db_group = models.Group(**group.dict())
+    db_group = models.Group(**group.model_dump())
+    if db_group.id is None:
+        db_group.id = uuid.uuid4()
     db.add(db_group)
     db.commit()
     db.refresh(db_group)
-    return db_group
+    return _serialize_group(db_group)
 
 @app.post("/contacts", response_model=schemas.ContactResponse)
 def create_contact(contact: schemas.ContactCreate, db: Session = Depends(get_db)):
-    db_contact = models.Contact(**contact.dict())
+    db_contact = models.Contact(**contact.model_dump())
+    if db_contact.id is None:
+        db_contact.id = uuid.uuid4()
     db.add(db_contact)
     db.commit()
     db.refresh(db_contact)
-    return db_contact
+    return _serialize_contact(db_contact)
+
+@app.get("/contacts", response_model=schemas.ContactListResponse)
+def list_contacts(
+    limit: int = Query(20, ge=1),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    _validate_ops_limit(limit)
+    contacts = db.query(models.Contact).order_by(models.Contact.name.asc(), models.Contact.id.asc()).all()
+    return schemas.ContactListResponse(
+        total=len(contacts),
+        limit=limit,
+        offset=offset,
+        items=[_serialize_contact(contact) for contact in contacts[offset : offset + limit]],
+    )
+
+@app.get("/contacts/{contact_id}", response_model=schemas.ContactResponse)
+def get_contact(contact_id: str, db: Session = Depends(get_db)):
+    _, contact = _load_contact_or_404(contact_id, db)
+    return _serialize_contact(contact)
+
+@app.patch("/contacts/{contact_id}", response_model=schemas.ContactResponse)
+def update_contact(
+    contact_id: str,
+    contact_update: schemas.ContactUpdate,
+    db: Session = Depends(get_db),
+):
+    _, contact = _load_contact_or_404(contact_id, db)
+    update_data = {key: value for key, value in contact_update.model_dump().items() if value is not None}
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No contact fields provided")
+    for key, value in update_data.items():
+        setattr(contact, key, value)
+    db.commit()
+    db.refresh(contact)
+    return _serialize_contact(contact)
+
+@app.delete("/contacts/{contact_id}", status_code=204)
+def delete_contact(contact_id: str, db: Session = Depends(get_db)):
+    contact_uuid, contact = _load_contact_or_404(contact_id, db)
+    _delete_contact_guard(db, contact_uuid)
+    db.delete(contact)
+    db.commit()
+    return Response(status_code=204)
+
+@app.get("/groups", response_model=schemas.GroupListResponse)
+def list_groups(
+    limit: int = Query(20, ge=1),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    _validate_ops_limit(limit)
+    groups = db.query(models.Group).order_by(models.Group.name.asc(), models.Group.id.asc()).all()
+    return schemas.GroupListResponse(
+        total=len(groups),
+        limit=limit,
+        offset=offset,
+        items=[_serialize_group(group) for group in groups[offset : offset + limit]],
+    )
+
+@app.get("/groups/{group_id}", response_model=schemas.GroupResponse)
+def get_group(group_id: str, db: Session = Depends(get_db)):
+    _, group = _load_group_or_404(group_id, db)
+    return _serialize_group(group)
+
+@app.patch("/groups/{group_id}", response_model=schemas.GroupResponse)
+def update_group(
+    group_id: str,
+    group_update: schemas.GroupUpdate,
+    db: Session = Depends(get_db),
+):
+    _, group = _load_group_or_404(group_id, db)
+    update_data = {key: value for key, value in group_update.model_dump().items() if value is not None}
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No group fields provided")
+    for key, value in update_data.items():
+        setattr(group, key, value)
+    db.commit()
+    db.refresh(group)
+    return _serialize_group(group)
+
+@app.delete("/groups/{group_id}", status_code=204)
+def delete_group(group_id: str, db: Session = Depends(get_db)):
+    group_uuid, group = _load_group_or_404(group_id, db)
+    _delete_group_guard(db, group_uuid)
+    db.delete(group)
+    db.commit()
+    return Response(status_code=204)
 
 @app.post("/groups/{group_id}/members", response_model=schemas.GroupMemberResponse)
 def add_group_member(group_id: str, member: schemas.GroupMemberCreate, db: Session = Depends(get_db)):
@@ -642,6 +791,33 @@ def add_group_member(group_id: str, member: schemas.GroupMemberCreate, db: Sessi
         db.commit()
 
     return schemas.GroupMemberResponse(group_id=group_uuid, contact_id=member.contact_id)
+
+@app.delete("/groups/{group_id}/members/{contact_id}", status_code=204)
+def delete_group_member(group_id: str, contact_id: str, db: Session = Depends(get_db)):
+    group_uuid, _ = _load_group_or_404(group_id, db)
+    try:
+        contact_uuid = uuid.UUID(contact_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid contact id") from exc
+
+    contact = db.query(models.Contact).filter(models.Contact.id == contact_uuid).first()
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+
+    membership = (
+        db.query(models.GroupMember)
+        .filter(
+            models.GroupMember.group_id == group_uuid,
+            models.GroupMember.contact_id == contact_uuid,
+        )
+        .first()
+    )
+    if not membership:
+        raise HTTPException(status_code=404, detail="Membership not found")
+
+    db.delete(membership)
+    db.commit()
+    return Response(status_code=204)
 
 @app.get("/groups/{group_id}/members", response_model=list[schemas.GroupMemberResponse])
 def list_group_members(group_id: str, db: Session = Depends(get_db)):

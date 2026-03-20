@@ -410,6 +410,146 @@ class FakeRuleSession(FakeSession):
         raise AssertionError(f"Unexpected query call: {args}")
 
 
+class FakeDirectoryQuery:
+    def __init__(self, items):
+        self._items = list(items)
+        self._filters = []
+        self._ordered = False
+        self._offset = 0
+        self._limit = None
+
+    def filter(self, *criteria):
+        self._filters.extend(criteria)
+        return self
+
+    def order_by(self, *criteria):
+        self._ordered = True
+        return self
+
+    def offset(self, value):
+        self._offset = value
+        return self
+
+    def limit(self, value):
+        self._limit = value
+        return self
+
+    def _matches(self, item):
+        for criterion in self._filters:
+            if isinstance(criterion, BinaryExpression):
+                field = getattr(criterion.left, "key", None) or getattr(criterion.left, "name", None)
+                expected = getattr(criterion.right, "value", None)
+                if expected is None:
+                    right_repr = str(criterion.right).strip().lower()
+                    if right_repr == "true":
+                        expected = True
+                    elif right_repr == "false":
+                        expected = False
+                if field is None:
+                    continue
+                actual = getattr(item, field, None)
+                if actual != expected and str(actual) != str(expected):
+                    return False
+        return True
+
+    def _filtered(self):
+        items = [item for item in self._items if self._matches(item)]
+        if self._ordered and items:
+            sample = items[0]
+            if hasattr(sample, "name"):
+                items.sort(key=lambda item: (getattr(item, "name", ""), str(getattr(item, "id", ""))))
+            elif hasattr(sample, "rule_name"):
+                items.sort(key=lambda item: (getattr(item, "rule_name", ""), str(getattr(item, "id", ""))))
+            elif hasattr(sample, "created_at"):
+                items.sort(key=lambda item: (getattr(item, "created_at", None), getattr(item, "id", None)))
+            elif hasattr(sample, "group_id") and hasattr(sample, "contact_id"):
+                items.sort(key=lambda item: (str(getattr(item, "group_id", "")), str(getattr(item, "contact_id", ""))))
+        if self._offset:
+            items = items[self._offset :]
+        if self._limit is not None:
+            items = items[: self._limit]
+        return items
+
+    def all(self):
+        return self._filtered()
+
+    def first(self):
+        items = self._filtered()
+        return items[0] if items else None
+
+    def count(self):
+        return len([item for item in self._items if self._matches(item)])
+
+
+class FakeDirectorySession(FakeSession):
+    def __init__(self, contacts=None, groups=None, group_members=None, notifications=None, rules=None):
+        super().__init__(queries=[])
+        self._contacts = list(contacts or [])
+        self._groups = list(groups or [])
+        self._group_members = list(group_members or [])
+        self._notifications = list(notifications or [])
+        self._rules = list(rules or [])
+        self.added_objects = []
+        self.deleted_objects = []
+
+    def query(self, *args, **kwargs):
+        if len(args) != 1:
+            raise AssertionError(f"Unexpected query call: {args}")
+        model = args[0]
+        if model is models.Contact:
+            return FakeDirectoryQuery(self._contacts)
+        if model is models.Group:
+            return FakeDirectoryQuery(self._groups)
+        if model is models.GroupMember:
+            return FakeDirectoryQuery(self._group_members)
+        if model is models.Notification:
+            return FakeDirectoryQuery(self._notifications)
+        if model is models.Rule:
+            return FakeDirectoryQuery(self._rules)
+        raise AssertionError(f"Unexpected query call: {args}")
+
+    def add(self, obj, *args, **kwargs):
+        self.added_objects.append(obj)
+        if hasattr(obj, "id") and getattr(obj, "id", None) is None:
+            obj.id = uuid.uuid4()
+        if isinstance(obj, models.Contact):
+            self._contacts.append(obj)
+        elif isinstance(obj, models.Group):
+            self._groups.append(obj)
+        elif isinstance(obj, models.GroupMember):
+            self._group_members.append(obj)
+        elif isinstance(obj, models.Notification):
+            self._notifications.append(obj)
+        elif isinstance(obj, models.Rule):
+            self._rules.append(obj)
+        return None
+
+    def delete(self, obj, *args, **kwargs):
+        self.deleted_objects.append(obj)
+        collections = [
+            self._contacts,
+            self._groups,
+            self._group_members,
+            self._notifications,
+            self._rules,
+        ]
+        for collection in collections:
+            for index, item in enumerate(list(collection)):
+                if self._same_record(item, obj):
+                    collection.pop(index)
+                    return None
+        return None
+
+    def _same_record(self, item, target):
+        compared = False
+        for attr in ("id", "group_id", "contact_id", "incident_id"):
+            if hasattr(item, attr) and hasattr(target, attr):
+                compared = True
+                if getattr(item, attr) != getattr(target, attr):
+                    return False
+        return compared and True
+
+
 @pytest.fixture(autouse=True)
 def reset_overrides():
     main.app.dependency_overrides = {}
@@ -1010,6 +1150,189 @@ def test_ops_readiness_healthy(client, monkeypatch):
         assert all(check["passed"] is True for check in payload["checks"])
         assert payload["evidence"]["heartbeats"]["queue_metrics_snapshot"]["last_status"] == "ok"
         assert payload["evidence"]["integration"]["dlq_reporting"]["report_status"] == "completed"
+    finally:
+        main.app.dependency_overrides.pop(main.get_db, None)
+
+
+def test_contacts_list_get_patch_delete_happy(client):
+    contact_a = models.Contact(
+        id=uuid.UUID("00000000-0000-0000-0000-00000000aa01"),
+        name="Alpha",
+        email="alpha@example.com",
+        phone=None,
+        whatsapp=None,
+        telegram_id=None,
+    )
+    contact_b = models.Contact(
+        id=uuid.UUID("00000000-0000-0000-0000-00000000aa02"),
+        name="Beta",
+        email="beta@example.com",
+        phone=None,
+        whatsapp=None,
+        telegram_id=None,
+    )
+    fake_session = FakeDirectorySession(contacts=[contact_b, contact_a])
+    main.app.dependency_overrides[main.get_db] = lambda: fake_session
+    try:
+        response = client.get("/contacts?limit=1&offset=1")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["total"] == 2
+        assert payload["limit"] == 1
+        assert payload["offset"] == 1
+        assert payload["items"][0]["id"] == str(contact_b.id)
+
+        detail = client.get(f"/contacts/{contact_a.id}")
+        assert detail.status_code == 200
+        assert detail.json()["name"] == "Alpha"
+
+        limit_invalid = client.get(f"/contacts?limit={main.OPS_ENDPOINT_MAX_LIMIT + 1}")
+        assert limit_invalid.status_code == 400
+
+        updated = client.patch(f"/contacts/{contact_a.id}", json={"phone": "555-0101"})
+        assert updated.status_code == 200
+        assert updated.json()["phone"] == "555-0101"
+
+        deleted = client.delete(f"/contacts/{contact_b.id}")
+        assert deleted.status_code == 204
+
+        missing = client.get(f"/contacts/{contact_b.id}")
+        assert missing.status_code == 404
+    finally:
+        main.app.dependency_overrides.pop(main.get_db, None)
+
+
+def test_contacts_delete_conflicts_and_validation(client):
+    contact = models.Contact(
+        id=uuid.UUID("00000000-0000-0000-0000-00000000ab01"),
+        name="Gamma",
+        email="gamma@example.com",
+        phone=None,
+        whatsapp=None,
+        telegram_id=None,
+    )
+    notification = models.Notification(
+        id=uuid.UUID("00000000-0000-0000-0000-00000000ab11"),
+        incident_id=uuid.UUID("00000000-0000-0000-0000-00000000ab21"),
+        contact_id=contact.id,
+        channel=models.NotificationChannel.VOICE,
+        status=models.NotificationStatus.PENDING,
+    )
+    group = models.Group(
+        id=uuid.UUID("00000000-0000-0000-0000-00000000ab31"),
+        name="group-ab31",
+        description=None,
+    )
+    membership = models.GroupMember(group_id=group.id, contact_id=contact.id)
+    fake_session = FakeDirectorySession(contacts=[contact], notifications=[notification], group_members=[membership], groups=[group])
+    main.app.dependency_overrides[main.get_db] = lambda: fake_session
+    try:
+        conflict = client.delete(f"/contacts/{contact.id}")
+        assert conflict.status_code == 409
+        assert "notifications" in conflict.json()["detail"].lower()
+
+        invalid = client.delete("/contacts/not-a-uuid")
+        assert invalid.status_code == 400
+
+        missing = client.delete("/contacts/00000000-0000-0000-0000-00000000ab02")
+        assert missing.status_code == 404
+    finally:
+        main.app.dependency_overrides.pop(main.get_db, None)
+
+
+def test_groups_list_member_delete_and_patch_happy(client):
+    group_a = models.Group(
+        id=uuid.UUID("00000000-0000-0000-0000-00000000ba01"),
+        name="Alpha Group",
+        description="old",
+    )
+    group_b = models.Group(
+        id=uuid.UUID("00000000-0000-0000-0000-00000000ba02"),
+        name="Beta Group",
+        description=None,
+    )
+    contact = models.Contact(
+        id=uuid.UUID("00000000-0000-0000-0000-00000000ba11"),
+        name="Member",
+        email="member@example.com",
+        phone=None,
+        whatsapp=None,
+        telegram_id=None,
+    )
+    membership = models.GroupMember(group_id=group_a.id, contact_id=contact.id)
+    fake_session = FakeDirectorySession(groups=[group_b, group_a], contacts=[contact], group_members=[membership])
+    main.app.dependency_overrides[main.get_db] = lambda: fake_session
+    try:
+        response = client.get("/groups?limit=1&offset=0")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["total"] == 2
+        assert payload["items"][0]["name"] == "Alpha Group"
+
+        detail = client.get(f"/groups/{group_a.id}")
+        assert detail.status_code == 200
+        assert detail.json()["description"] == "old"
+
+        updated = client.patch(f"/groups/{group_a.id}", json={"description": "new"})
+        assert updated.status_code == 200
+        assert updated.json()["description"] == "new"
+
+        member_deleted = client.delete(f"/groups/{group_a.id}/members/{contact.id}")
+        assert member_deleted.status_code == 204
+
+        group_deleted = client.delete(f"/groups/{group_a.id}")
+        assert group_deleted.status_code == 204
+
+        missing = client.get(f"/groups/{group_a.id}")
+        assert missing.status_code == 404
+    finally:
+        main.app.dependency_overrides.pop(main.get_db, None)
+
+
+def test_groups_delete_conflicts_and_member_validation(client):
+    group = models.Group(
+        id=uuid.UUID("00000000-0000-0000-0000-00000000bb01"),
+        name="Conflict Group",
+        description=None,
+    )
+    rule = models.Rule(
+        id=uuid.UUID("00000000-0000-0000-0000-00000000bb11"),
+        rule_name="rule",
+        condition_json={"source": "x"},
+        recipient_group_id=group.id,
+        channels=["voice"],
+        active=True,
+        priority=10,
+        requires_ack=False,
+        ack_deadline=None,
+        fallback_policy_json=None,
+    )
+    contact = models.Contact(
+        id=uuid.UUID("00000000-0000-0000-0000-00000000bb21"),
+        name="Orphan",
+        email="orphan@example.com",
+        phone=None,
+        whatsapp=None,
+        telegram_id=None,
+    )
+    fake_session = FakeDirectorySession(groups=[group], rules=[rule], contacts=[contact], group_members=[])
+    main.app.dependency_overrides[main.get_db] = lambda: fake_session
+    try:
+        conflict = client.delete(f"/groups/{group.id}")
+        assert conflict.status_code == 409
+        assert "rules" in conflict.json()["detail"].lower()
+
+        invalid = client.delete("/groups/not-a-uuid")
+        assert invalid.status_code == 400
+
+        missing = client.delete("/groups/00000000-0000-0000-0000-00000000bb02")
+        assert missing.status_code == 404
+
+        member_invalid = client.delete(f"/groups/{group.id}/members/not-a-uuid")
+        assert member_invalid.status_code == 400
+
+        member_missing = client.delete(f"/groups/{group.id}/members/{contact.id}")
+        assert member_missing.status_code == 404
     finally:
         main.app.dependency_overrides.pop(main.get_db, None)
 

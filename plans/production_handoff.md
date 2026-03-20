@@ -9,9 +9,10 @@ This document is the practical handoff for running Seriema in production.
 3. Run `alembic upgrade head` against the target database.
 4. Start the API service.
 5. Start Celery workers and the beat scheduler.
-6. Verify `/health`, `/health/deps`, `/metrics/sla`, and `/metrics/queues`.
-7. Send one test event and confirm the full ingest-to-ack flow.
-8. Verify Metabase dashboards read from the `seriema` views.
+6. Verify `/health`, `/health/deps`, `/metrics/sla`, `/metrics/queues`, `/ops/integration/status`, and `/ops/readiness`.
+7. Run the smoke handoff check: `powershell -ExecutionPolicy Bypass -File .\scripts\smoke_e2e_handoff.ps1`.
+8. Send one test event and confirm the full ingest-to-ack flow.
+9. Verify Metabase dashboards read from the `seriema` views.
 
 ## Required Environment Variables
 
@@ -22,6 +23,7 @@ This document is the practical handoff for running Seriema in production.
 - `SERIEMA_REDIS_KEY_PREFIX`
 - `SERIEMA_QUEUE_PREFIX`
 - `APP_BASE_URL`
+- `SERIEMA_API_BASE_URL` for the smoke handoff script when the API is not on `127.0.0.1:8000`
 
 ## Required When Enabled
 
@@ -71,9 +73,11 @@ This document is the practical handoff for running Seriema in production.
 2. Review `/metrics/queues`.
 3. Review `/metrics/ops`.
 4. Check `/metrics/sla?hours=24`.
-5. Inspect `/ops/dlq/preview` if the DLQ is non-empty.
-6. Confirm Metabase dashboards still show the expected 24h trend.
-7. Review logs for `FAILED`, `ESCALATED`, and `ACK_RECEIVED`.
+5. Review `/ops/integration/status`.
+6. Review `/ops/readiness`.
+7. Inspect `/ops/dlq/preview` if the DLQ is non-empty.
+8. Confirm Metabase dashboards still show the expected 24h trend.
+9. Review logs for `FAILED`, `ESCALATED`, and `ACK_RECEIVED`.
 
 ## Troubleshooting
 
@@ -113,7 +117,11 @@ This document is the practical handoff for running Seriema in production.
 - `GET /health/deps` reports PostgreSQL and Redis as `ok`.
 - `GET /metrics/sla` and `GET /metrics/queues` return valid payloads.
 - `GET /metrics/ops` returns a populated or empty metrics hash cleanly.
+- `GET /alerts/ops` returns a valid alert snapshot.
+- `GET /ops/integration/status` returns a consistent handoff signal.
+- `GET /ops/readiness` returns a readiness score and blockers list.
 - `GET /ops/dlq/preview` works with the configured admin token.
+- `GET /ops/dlq/replay/last` returns the latest replay report shape.
 - Workers start with the expected queues and beat schedule.
 
 ## Post-Deploy Checklist
@@ -124,6 +132,7 @@ This document is the practical handoff for running Seriema in production.
 - Confirm callback acknowledgement works in the test environment.
 - Confirm Metabase views are present and queryable.
 - Confirm DLQ stays bounded and pruning is active.
+- Run `powershell -ExecutionPolicy Bypass -File .\scripts\smoke_e2e_handoff.ps1` and keep the report for handoff.
 
 ## Handoff Notes
 

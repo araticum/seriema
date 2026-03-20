@@ -142,8 +142,13 @@ Important modeling choices:
 - `GET /metrics/sla`
 - `GET /metrics/queues`
 - `GET /metrics/ops`
+- `GET /alerts/ops`
+- `GET /ops/integration/status`
+- `GET /ops/readiness`
 - `GET /ops/dlq/preview`
 - `POST /ops/dlq/replay`
+- `GET /ops/dlq/replay/last`
+- `GET /incidents/{incident_id}/timeline`
 
 ### Worker Metrics
 

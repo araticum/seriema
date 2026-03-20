@@ -53,6 +53,7 @@ Sinais de alerta:
 - Confirmar que `alembic upgrade head` funciona em banco limpo.
 - Confirmar que a fila `dlq` está vazia ou triada.
 - Confirmar que o snapshot operacional está atualizando.
+- Confirmar que `/ops/integration/status` e `/ops/readiness` retornam sinais coerentes.
 - Confirmar que o webhook de voz usa a janela de assinatura esperada.
 - Confirmar que o limite operacional dos endpoints está configurado.
 
@@ -64,3 +65,14 @@ Sinais de alerta:
 - Validar `metrics/sla`.
 - Validar `metrics/queues`.
 - Validar preview e replay de DLQ com token operacional, se configurado.
+- Validar `/ops/dlq/replay/last` e `/ops/integration/status`.
+
+## Smoke Final De Handoff
+
+Use este comando para o checklist final antes do aceite operacional:
+
+`powershell -ExecutionPolicy Bypass -File .\scripts\smoke_e2e_handoff.ps1`
+
+O smoke percorre `health`, `health/deps`, `metrics` basicos, `ops/integration/status`, `ops/readiness` e, por fim, faz fallback para `pre_release_check`.
+
+Se a API nao estiver disponivel, o smoke deve registrar a falha de conexao nas etapas HTTP e ainda executar o fallback local para deixar o estado do pipeline visivel.

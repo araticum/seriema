@@ -50,12 +50,35 @@ class ContactCreate(BaseModel):
 class ContactResponse(ContactCreate):
     id: uuid.UUID
 
+class ContactUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    whatsapp: Optional[str] = None
+    telegram_id: Optional[str] = None
+
+class ContactListResponse(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    items: List[ContactResponse]
+
 class GroupCreate(BaseModel):
     name: str
     description: Optional[str] = None
 
 class GroupResponse(GroupCreate):
     id: uuid.UUID
+
+class GroupUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+
+class GroupListResponse(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    items: List[GroupResponse]
 
 class GroupMemberCreate(BaseModel):
     contact_id: uuid.UUID
