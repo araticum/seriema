@@ -1,0 +1,150 @@
+services:
+  loki:
+    image: grafana/loki:3.0.0
+    container_name: oasis-radar-loki
+    restart: unless-stopped
+    entrypoint:
+      - /bin/sh
+      - -lc
+    command: |
+      cat <<'EOF' >/tmp/loki-config.yml
+      auth_enabled: false
+      server:
+        http_listen_port: 3100
+        grpc_listen_port: 9096
+      common:
+        replication_factor: 1
+        ring:
+          kvstore:
+            store: inmemory
+      schema_config:
+        configs:
+          - from: 2024-01-01
+            store: tsdb
+            object_store: filesystem
+            schema: v13
+            index:
+              prefix: index_
+              period: 24h
+      storage_config:
+        filesystem:
+          directory: /loki/chunks
+      limits_config:
+        retention_period: 168h
+        ingestion_rate_mb: 4
+        ingestion_burst_size_mb: 8
+        max_label_names_per_series: 30
+        reject_old_samples: true
+        reject_old_samples_max_age: 168h
+      compactor:
+        working_directory: /loki/compactor
+        compaction_interval: 10m
+        retention_enabled: true
+        delete_request_store: filesystem
+      ruler:
+        storage:
+          type: local
+          local:
+            directory: /loki/rules
+        rule_path: /loki/rules-temp
+        alertmanager_url: http://localhost:9093
+        ring:
+          kvstore:
+            store: inmemory
+        enable_api: false
+      EOF
+      exec /usr/bin/loki -config.file=/tmp/loki-config.yml
+    ports:
+      - "10.0.0.10:3100:3100"
+    volumes:
+      - oasis-radar-loki-data:/loki
+    networks:
+      - oasis-radar-net
+
+  promtail:
+    image: grafana/promtail:3.0.0
+    container_name: oasis-radar-promtail
+    restart: unless-stopped
+    depends_on:
+      - loki
+    entrypoint:
+      - /bin/sh
+      - -lc
+    command: |
+      cat <<'EOF' >/tmp/promtail-config.yml
+      server:
+        http_listen_port: 9080
+        grpc_listen_port: 0
+      positions:
+        filename: /tmp/positions.yaml
+      clients:
+        - url: http://loki:3100/loki/api/v1/push
+      scrape_configs:
+        - job_name: docker-containers
+          docker_sd_configs:
+            - host: unix:///var/run/docker.sock
+              refresh_interval: 15s
+          relabel_configs:
+            - source_labels: ['__meta_docker_container_name']
+              regex: '/(.*)'
+              target_label: container
+            - source_labels: ['__meta_docker_container_name']
+              regex: '/oasis-(.*)'
+              target_label: oasis_container
+            - source_labels: ['__meta_docker_container_label_com_docker_compose_project']
+              target_label: compose_project
+            - source_labels: ['__meta_docker_container_label_com_docker_compose_service']
+              target_label: compose_service
+            - source_labels: ['__meta_docker_container_log_stream']
+              target_label: stream
+            - source_labels: ['__meta_docker_container_label_com_docker_compose_oneoff']
+              regex: 'True'
+              action: drop
+            - source_labels: ['__meta_docker_container_name']
+              regex: '/(oasis-.*|oasis-radar-.*|portainer|traefik.*|nginx.*)'
+              action: keep
+            - source_labels: ['__meta_docker_container_id']
+              target_label: __path__
+              replacement: /var/lib/docker/containers/$1/*-json.log
+      EOF
+      exec /usr/bin/promtail -config.file=/tmp/promtail-config.yml
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - oasis-radar-promtail-positions:/tmp
+    networks:
+      - oasis-radar-net
+
+  flower:
+    image: mher/flower:2.0.1
+    container_name: oasis-radar-flower
+    restart: unless-stopped
+    command:
+      - celery
+      - --broker=${OASIS_RADAR_CELERY_BROKER_URL:-redis://oasis-veredas-redis:6379/0}
+      - flower
+      - --address=0.0.0.0
+      - --port=5555
+      - --persistent=True
+      - --db=/data/flower.db
+      - --basic_auth=${FLOWER_BASIC_AUTH:-admin:change-me}
+    ports:
+      - "5555:5555"
+    volumes:
+      - oasis-radar-flower-data:/data
+    networks:
+      - oasis-radar-net
+      - oasis-oasis-net
+
+volumes:
+  oasis-radar-loki-data:
+  oasis-radar-promtail-positions:
+  oasis-radar-flower-data:
+
+networks:
+  oasis-radar-net:
+    name: oasis-radar-net
+    driver: bridge
+  oasis-oasis-net:
+    external: true
+    name: oasis_oasis-net
