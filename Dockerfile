@@ -10,8 +10,10 @@ WORKDIR /app
 COPY requirements.txt ./requirements.txt
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
-COPY . .
+RUN mkdir -p /app/seriema
+COPY . /app/seriema/
+RUN test -f /app/seriema/__init__.py || touch /app/seriema/__init__.py
 
 EXPOSE 8000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["gunicorn", "seriema.main:app", "-w", "2", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000"]
