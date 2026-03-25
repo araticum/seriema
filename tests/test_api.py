@@ -691,6 +691,7 @@ def test_oasis_radar_pull_error_updates_metrics(client, monkeypatch):
     fake_session = FakeSession(queries=[])
     main.app.dependency_overrides[main.get_db] = lambda: fake_session
     monkeypatch.setattr(main, "redis_conn", fake_redis)
+    monkeypatch.setenv("SERIEMA_ADMIN_TOKEN", "test-admin-token")
 
     from urllib.error import URLError
 
@@ -702,7 +703,10 @@ def test_oasis_radar_pull_error_updates_metrics(client, monkeypatch):
         ),
     )
     try:
-        response = client.post("/integrations/oasis-radar/pull")
+        response = client.post(
+            "/integrations/oasis-radar/pull",
+            headers={"X-Admin-Token": "test-admin-token"},
+        )
         assert response.status_code == 502
         assert fake_redis.hash["oasis_radar_pull_failed_total"] == 1
         assert fake_redis.hash["oasis_radar_pull_last_status"] == "connectivity_error"
