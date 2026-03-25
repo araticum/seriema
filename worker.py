@@ -37,7 +37,6 @@ from .config import (
     CELERY_TASK_TIME_LIMIT,
     METRICS_SNAPSHOT_INTERVAL_SECONDS,
     INCIDENT_STALE_MINUTES,
-    INCIDENT_STALE_SWEEP_INTERVAL_SECONDS,
     OPS_ENDPOINT_MAX_LIMIT,
     REDIS_URL,
     METRICS_KEY,
@@ -110,8 +109,6 @@ celery_app.conf.update(
         "voice_worker": {"queue": queue_name("voice")},
         "telegram_worker": {"queue": queue_name("telegram")},
         "email_worker": {"queue": queue_name("email")},
-        "escalation_worker": {"queue": queue_name("escalation")},
-        "stale_incident_sweeper": {"queue": queue_name("escalation")},
         "replay_dlq": {"queue": queue_name(DLQ_QUEUE_NAME)},
         "prune_dlq": {"queue": queue_name(DLQ_QUEUE_NAME)},
     },
@@ -127,10 +124,6 @@ celery_app.conf.update(
         "dlq-prune": {
             "task": "prune_dlq",
             "schedule": DLQ_PRUNE_INTERVAL_SECONDS,
-        },
-        "stale-incident-sweeper": {
-            "task": "stale_incident_sweeper",
-            "schedule": INCIDENT_STALE_SWEEP_INTERVAL_SECONDS,
         },
         "oasis-radar-pull": {
             "task": "oasis_radar_pull_worker",
@@ -1388,18 +1381,9 @@ def oasis_radar_pull_worker(limit: int | None = None):
     return _pull_oasis_radar_impl(limit=limit)
 
 
-@celery_app.task(
-    name="escalation_worker",
-    bind=True,
-    autoretry_for=(Exception,),
-    retry_backoff=CELERY_TASK_RETRY_BACKOFF,
-    retry_backoff_max=CELERY_TASK_RETRY_BACKOFF_MAX,
-    retry_jitter=CELERY_TASK_RETRY_JITTER,
-    max_retries=CELERY_TASK_MAX_RETRIES,
-    soft_time_limit=CELERY_TASK_SOFT_TIME_LIMIT,
-    time_limit=CELERY_TASK_TIME_LIMIT,
-)
-def handle_escalation(self, incident_id: str, trace_id: str):
+# desabilitado temporariamente — sem oncall configurado
+# Mantido no código para futura reativação, mas sem registro no Celery ao iniciar.
+def handle_escalation(incident_id: str, trace_id: str):
     return _handle_escalation_impl(incident_id, trace_id)
 
 
@@ -1526,7 +1510,8 @@ def _handle_escalation_impl(incident_id: str, trace_id: str):
         return True
 
 
-@celery_app.task(name="stale_incident_sweeper")
+# desabilitado temporariamente — sem oncall configurado
+# Mantido no código para futura reativação, mas sem registro no Celery ao iniciar.
 def stale_incident_sweeper():
     db: Session = SessionLocal()
     swept = 0
