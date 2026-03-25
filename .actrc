@@ -1,0 +1,2 @@
+-W .github/workflows/ci.yml
+-j checks

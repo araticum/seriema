@@ -1,0 +1,9 @@
+-r requirements.txt
+pytest
+pytest-cov
+httpx
+ruff
+black
+mypy
+pre-commit
+pip-tools

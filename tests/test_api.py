@@ -1,4 +1,7 @@
+import hashlib
+import hmac
 import os
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -45,9 +48,11 @@ class FakeSession:
 
     def execute(self, statement):
         self.executed.append(statement)
+
         class _ScalarResult:
             def scalar(self_inner):
                 return 1
+
         return _ScalarResult()
 
     def add(self, *args, **kwargs):
@@ -70,7 +75,9 @@ class FakeRedis:
     hashes: dict | None = None
 
     def llen(self, key):
-        return self.lengths.get(key, len(self.dlq_entries) if key.endswith(":dlq") else 0)
+        return self.lengths.get(
+            key, len(self.dlq_entries) if key.endswith(":dlq") else 0
+        )
 
     def lrange(self, key, start, end):
         if key.endswith(":dlq"):
@@ -94,7 +101,9 @@ class FakeRedis:
 
     def rpush(self, key, value):
         if key.endswith(":dlq"):
-            self.dlq_entries.append(value.encode("utf-8") if isinstance(value, str) else value)
+            self.dlq_entries.append(
+                value.encode("utf-8") if isinstance(value, str) else value
+            )
             return len(self.dlq_entries)
         return 0
 
@@ -184,7 +193,9 @@ class FakeIncidentQuery:
     def _matches(self, incident):
         for criterion in self._filters:
             if isinstance(criterion, BinaryExpression):
-                field = getattr(criterion.left, "key", None) or getattr(criterion.left, "name", None)
+                field = getattr(criterion.left, "key", None) or getattr(
+                    criterion.left, "name", None
+                )
                 expected = getattr(criterion.right, "value", None)
                 if field is None:
                     continue
@@ -196,7 +207,9 @@ class FakeIncidentQuery:
     def _filtered(self):
         items = [incident for incident in self._incidents if self._matches(incident)]
         if self._ordered:
-            items.sort(key=lambda incident: (incident.created_at, incident.id), reverse=True)
+            items.sort(
+                key=lambda incident: (incident.created_at, incident.id), reverse=True
+            )
         if self._offset:
             items = items[self._offset :]
         if self._limit is not None:
@@ -205,7 +218,9 @@ class FakeIncidentQuery:
 
     def scalar(self):
         if self._count_mode:
-            return len([incident for incident in self._incidents if self._matches(incident)])
+            return len(
+                [incident for incident in self._incidents if self._matches(incident)]
+            )
         return None
 
     def all(self):
@@ -257,7 +272,9 @@ class FakeModelQuery:
     def _matches(self, item):
         for criterion in self._filters:
             if isinstance(criterion, BinaryExpression):
-                field = getattr(criterion.left, "key", None) or getattr(criterion.left, "name", None)
+                field = getattr(criterion.left, "key", None) or getattr(
+                    criterion.left, "name", None
+                )
                 expected = getattr(criterion.right, "value", None)
                 if field is None:
                     continue
@@ -269,7 +286,9 @@ class FakeModelQuery:
     def _filtered(self):
         items = [item for item in self._items if self._matches(item)]
         if self._ordered and items and hasattr(items[0], "created_at"):
-            items.sort(key=lambda item: (getattr(item, "created_at"), getattr(item, "id", "")))
+            items.sort(
+                key=lambda item: (getattr(item, "created_at"), getattr(item, "id", ""))
+            )
         if self._offset:
             items = items[self._offset :]
         if self._limit is not None:
@@ -363,7 +382,9 @@ class FakeRuleQuery:
     def _matches(self, item):
         for criterion in self._filters:
             if isinstance(criterion, BinaryExpression):
-                field = getattr(criterion.left, "key", None) or getattr(criterion.left, "name", None)
+                field = getattr(criterion.left, "key", None) or getattr(
+                    criterion.left, "name", None
+                )
                 expected = getattr(criterion.right, "value", None)
                 if expected is None:
                     right_repr = str(criterion.right).strip().lower()
@@ -437,7 +458,9 @@ class FakeDirectoryQuery:
     def _matches(self, item):
         for criterion in self._filters:
             if isinstance(criterion, BinaryExpression):
-                field = getattr(criterion.left, "key", None) or getattr(criterion.left, "name", None)
+                field = getattr(criterion.left, "key", None) or getattr(
+                    criterion.left, "name", None
+                )
                 expected = getattr(criterion.right, "value", None)
                 if expected is None:
                     right_repr = str(criterion.right).strip().lower()
@@ -457,13 +480,33 @@ class FakeDirectoryQuery:
         if self._ordered and items:
             sample = items[0]
             if hasattr(sample, "name"):
-                items.sort(key=lambda item: (getattr(item, "name", ""), str(getattr(item, "id", ""))))
+                items.sort(
+                    key=lambda item: (
+                        getattr(item, "name", ""),
+                        str(getattr(item, "id", "")),
+                    )
+                )
             elif hasattr(sample, "rule_name"):
-                items.sort(key=lambda item: (getattr(item, "rule_name", ""), str(getattr(item, "id", ""))))
+                items.sort(
+                    key=lambda item: (
+                        getattr(item, "rule_name", ""),
+                        str(getattr(item, "id", "")),
+                    )
+                )
             elif hasattr(sample, "created_at"):
-                items.sort(key=lambda item: (getattr(item, "created_at", None), getattr(item, "id", None)))
+                items.sort(
+                    key=lambda item: (
+                        getattr(item, "created_at", None),
+                        getattr(item, "id", None),
+                    )
+                )
             elif hasattr(sample, "group_id") and hasattr(sample, "contact_id"):
-                items.sort(key=lambda item: (str(getattr(item, "group_id", "")), str(getattr(item, "contact_id", ""))))
+                items.sort(
+                    key=lambda item: (
+                        str(getattr(item, "group_id", "")),
+                        str(getattr(item, "contact_id", "")),
+                    )
+                )
         if self._offset:
             items = items[self._offset :]
         if self._limit is not None:
@@ -482,7 +525,14 @@ class FakeDirectoryQuery:
 
 
 class FakeDirectorySession(FakeSession):
-    def __init__(self, contacts=None, groups=None, group_members=None, notifications=None, rules=None):
+    def __init__(
+        self,
+        contacts=None,
+        groups=None,
+        group_members=None,
+        notifications=None,
+        rules=None,
+    ):
         super().__init__(queries=[])
         self._contacts = list(contacts or [])
         self._groups = list(groups or [])
@@ -629,12 +679,15 @@ def test_ingest_event_duplicate_records_duplicate_audit(client, monkeypatch):
         assert payload["incident_id"] is None
         assert payload["matched_rule"] is False
         assert any(
-            isinstance(obj, models.AuditLog) and obj.action == models.AuditAction.DUPLICATED_EVENT
+            isinstance(obj, models.AuditLog)
+            and obj.action == models.AuditAction.DUPLICATED_EVENT
             for obj in fake_session.added_objects
         )
         duplicate_audit = next(
-            obj for obj in fake_session.added_objects
-            if isinstance(obj, models.AuditLog) and obj.action == models.AuditAction.DUPLICATED_EVENT
+            obj
+            for obj in fake_session.added_objects
+            if isinstance(obj, models.AuditLog)
+            and obj.action == models.AuditAction.DUPLICATED_EVENT
         )
         assert duplicate_audit.incident_id is None
         assert duplicate_audit.details_json["dedupe_key"] == "dup-key-1"
@@ -829,7 +882,12 @@ def test_alerts_ops_with_alerts(client, monkeypatch):
     assert payload["overall_severity"] == "critical"
     assert payload["alert_count"] == 4
     alert_types = {alert["alert_type"] for alert in payload["alerts"]}
-    assert alert_types == {"dlq_size", "queue_backlog:dispatch", "queue_backlog:voice", "ack_rate_24h"}
+    assert alert_types == {
+        "dlq_size",
+        "queue_backlog:dispatch",
+        "queue_backlog:voice",
+        "ack_rate_24h",
+    }
     severities = {alert["severity"] for alert in payload["alerts"]}
     assert "critical" in severities
     assert "warn" in severities
@@ -846,26 +904,38 @@ def test_ops_dlq_preview_and_replay_auth_and_limit(client, monkeypatch):
         ],
     )
     monkeypatch.setattr(main, "redis_conn", fake_redis)
-    monkeypatch.setattr(main, "replay_dlq", FakeReplayTask({"replayed": 1, "remaining": 0}))
+    monkeypatch.setattr(
+        main, "replay_dlq", FakeReplayTask({"replayed": 1, "remaining": 0})
+    )
     monkeypatch.setattr(main.celery_app.conf, "task_always_eager", True, raising=False)
 
-    unauthorized = client.get("/ops/dlq/preview?limit=1", headers={"X-Admin-Token": "wrong"})
+    unauthorized = client.get(
+        "/ops/dlq/preview?limit=1", headers={"X-Admin-Token": "wrong"}
+    )
     assert unauthorized.status_code == 401
 
-    over_limit_preview = client.get("/ops/dlq/preview?limit=101", headers={"X-Admin-Token": "admin-secret"})
+    over_limit_preview = client.get(
+        "/ops/dlq/preview?limit=101", headers={"X-Admin-Token": "admin-secret"}
+    )
     assert over_limit_preview.status_code == 400
 
-    over_limit_replay = client.post("/ops/dlq/replay?limit=101", headers={"X-Admin-Token": "admin-secret"})
+    over_limit_replay = client.post(
+        "/ops/dlq/replay?limit=101", headers={"X-Admin-Token": "admin-secret"}
+    )
     assert over_limit_replay.status_code == 400
 
-    preview = client.get("/ops/dlq/preview?limit=1", headers={"X-Admin-Token": "admin-secret"})
+    preview = client.get(
+        "/ops/dlq/preview?limit=1", headers={"X-Admin-Token": "admin-secret"}
+    )
     assert preview.status_code == 200
     payload = preview.json()
     assert payload["total_items"] == 1
     assert payload["items"][0]["task_name"] == "email_worker"
     assert payload["items"][0]["trace_id"] == "t1"
 
-    replay = client.post("/ops/dlq/replay?limit=1", headers={"X-Admin-Token": "admin-secret"})
+    replay = client.post(
+        "/ops/dlq/replay?limit=1", headers={"X-Admin-Token": "admin-secret"}
+    )
     assert replay.status_code == 200
     replay_payload = replay.json()
     assert replay_payload["status"] == "completed"
@@ -1009,9 +1079,13 @@ def test_ops_integration_status_with_minimal_signals(client, monkeypatch):
             created_at=datetime(2026, 3, 20, 16, 10, 0),
         ),
     ]
-    fake_session = FakeLifecycleSession([incident_ack, incident_open], audit_logs=audit_logs)
+    fake_session = FakeLifecycleSession(
+        [incident_ack, incident_open], audit_logs=audit_logs
+    )
     main.app.dependency_overrides[main.get_db] = lambda: fake_session
-    monkeypatch.setattr(main, "get_dlq_replay_report", lambda: {"status": "completed", "replayed": 1})
+    monkeypatch.setattr(
+        main, "get_dlq_replay_report", lambda: {"status": "completed", "replayed": 1}
+    )
     try:
         response = client.get("/ops/integration/status")
 
@@ -1030,7 +1104,9 @@ def test_ops_integration_status_with_minimal_signals(client, monkeypatch):
         assert payload["evidence"]["ack_flow"]["acknowledged_incidents"] == 1
         assert payload["evidence"]["escalation_guard"]["escalated_logs"] == 1
         assert payload["evidence"]["escalation_guard"]["non_open_incidents"] == 1
-        assert payload["evidence"]["escalation_guard"]["non_open_escalated_incidents"] == 0
+        assert (
+            payload["evidence"]["escalation_guard"]["non_open_escalated_incidents"] == 0
+        )
         assert payload["evidence"]["dlq_reporting"]["report_status"] == "completed"
     finally:
         main.app.dependency_overrides.pop(main.get_db, None)
@@ -1052,8 +1128,14 @@ def test_ops_readiness_empty_degraded(client, monkeypatch):
         assert any(not check["passed"] for check in payload["checks"])
         assert payload["blockers"]
         assert "ack_flow_signal" in payload["blockers"]
-        assert payload["evidence"]["heartbeats"]["queue_metrics_snapshot"]["last_run_at"] is None
-        assert payload["evidence"]["heartbeats"]["queue_metrics_snapshot"]["last_status"] is None
+        assert (
+            payload["evidence"]["heartbeats"]["queue_metrics_snapshot"]["last_run_at"]
+            is None
+        )
+        assert (
+            payload["evidence"]["heartbeats"]["queue_metrics_snapshot"]["last_status"]
+            is None
+        )
     finally:
         main.app.dependency_overrides.pop(main.get_db, None)
 
@@ -1121,7 +1203,9 @@ def test_ops_readiness_healthy(client, monkeypatch):
             created_at=datetime(2026, 3, 20, 18, 10, 0),
         ),
     ]
-    fake_session = FakeLifecycleSession([incident_ack, incident_open], audit_logs=audit_logs)
+    fake_session = FakeLifecycleSession(
+        [incident_ack, incident_open], audit_logs=audit_logs
+    )
     fake_redis = FakeRedis(
         lengths={},
         dlq_entries=[],
@@ -1138,7 +1222,9 @@ def test_ops_readiness_healthy(client, monkeypatch):
     )
     main.app.dependency_overrides[main.get_db] = lambda: fake_session
     monkeypatch.setattr(main, "redis_conn", fake_redis)
-    monkeypatch.setattr(main, "get_dlq_replay_report", lambda: {"status": "completed", "replayed": 1})
+    monkeypatch.setattr(
+        main, "get_dlq_replay_report", lambda: {"status": "completed", "replayed": 1}
+    )
     try:
         response = client.get("/ops/readiness")
 
@@ -1148,8 +1234,14 @@ def test_ops_readiness_healthy(client, monkeypatch):
         assert payload["score"] == 100
         assert payload["blockers"] == []
         assert all(check["passed"] is True for check in payload["checks"])
-        assert payload["evidence"]["heartbeats"]["queue_metrics_snapshot"]["last_status"] == "ok"
-        assert payload["evidence"]["integration"]["dlq_reporting"]["report_status"] == "completed"
+        assert (
+            payload["evidence"]["heartbeats"]["queue_metrics_snapshot"]["last_status"]
+            == "ok"
+        )
+        assert (
+            payload["evidence"]["integration"]["dlq_reporting"]["report_status"]
+            == "completed"
+        )
     finally:
         main.app.dependency_overrides.pop(main.get_db, None)
 
@@ -1224,7 +1316,12 @@ def test_contacts_delete_conflicts_and_validation(client):
         description=None,
     )
     membership = models.GroupMember(group_id=group.id, contact_id=contact.id)
-    fake_session = FakeDirectorySession(contacts=[contact], notifications=[notification], group_members=[membership], groups=[group])
+    fake_session = FakeDirectorySession(
+        contacts=[contact],
+        notifications=[notification],
+        group_members=[membership],
+        groups=[group],
+    )
     main.app.dependency_overrides[main.get_db] = lambda: fake_session
     try:
         conflict = client.delete(f"/contacts/{contact.id}")
@@ -1260,7 +1357,9 @@ def test_groups_list_member_delete_and_patch_happy(client):
         telegram_id=None,
     )
     membership = models.GroupMember(group_id=group_a.id, contact_id=contact.id)
-    fake_session = FakeDirectorySession(groups=[group_b, group_a], contacts=[contact], group_members=[membership])
+    fake_session = FakeDirectorySession(
+        groups=[group_b, group_a], contacts=[contact], group_members=[membership]
+    )
     main.app.dependency_overrides[main.get_db] = lambda: fake_session
     try:
         response = client.get("/groups?limit=1&offset=0")
@@ -1315,7 +1414,9 @@ def test_groups_delete_conflicts_and_member_validation(client):
         whatsapp=None,
         telegram_id=None,
     )
-    fake_session = FakeDirectorySession(groups=[group], rules=[rule], contacts=[contact], group_members=[])
+    fake_session = FakeDirectorySession(
+        groups=[group], rules=[rule], contacts=[contact], group_members=[]
+    )
     main.app.dependency_overrides[main.get_db] = lambda: fake_session
     try:
         conflict = client.delete(f"/groups/{group.id}")
@@ -1386,7 +1487,9 @@ def test_list_incidents_filters_and_pagination(client):
     fake_session = FakeIncidentSession(incidents)
     main.app.dependency_overrides[main.get_db] = lambda: fake_session
 
-    response = client.get("/incidents?status=ACKNOWLEDGED&source=prometheus&severity=CRITICAL&limit=10&offset=0")
+    response = client.get(
+        "/incidents?status=ACKNOWLEDGED&source=prometheus&severity=CRITICAL&limit=10&offset=0"
+    )
 
     assert response.status_code == 200
     payload = response.json()
@@ -1505,14 +1608,19 @@ def test_ack_incident_success_404_and_409(client):
         assert payload["incident"]["acknowledged_by"] == "alice"
         assert payload["incident"]["acknowledged_at"] is not None
         assert any(
-            isinstance(obj, models.AuditLog) and obj.action == models.AuditAction.ACK_RECEIVED
+            isinstance(obj, models.AuditLog)
+            and obj.action == models.AuditAction.ACK_RECEIVED
             for obj in fake_session.added_objects
         )
 
-        missing = client.post("/incidents/00000000-0000-0000-0000-00000000ffff/ack", json={})
+        missing = client.post(
+            "/incidents/00000000-0000-0000-0000-00000000ffff/ack", json={}
+        )
         assert missing.status_code == 404
 
-        conflict = client.post(f"/incidents/{acknowledged.id}/ack", json={"acknowledged_by": "bob"})
+        conflict = client.post(
+            f"/incidents/{acknowledged.id}/ack", json={"acknowledged_by": "bob"}
+        )
         assert conflict.status_code == 409
     finally:
         main.app.dependency_overrides.pop(main.get_db, None)
@@ -1560,7 +1668,8 @@ def test_resolve_incident_success_404_and_409(client):
         assert payload["incident"]["id"] == incident.id
         assert payload["incident"]["status"] == "RESOLVED"
         assert any(
-            isinstance(obj, models.AuditLog) and obj.action == models.AuditAction.CALLBACK_RECEIVED
+            isinstance(obj, models.AuditLog)
+            and obj.action == models.AuditAction.CALLBACK_RECEIVED
             for obj in fake_session.added_objects
         )
         assert any(
@@ -1570,10 +1679,14 @@ def test_resolve_incident_success_404_and_409(client):
             for obj in fake_session.added_objects
         )
 
-        missing = client.post("/incidents/00000000-0000-0000-0000-00000000ffff/resolve", json={})
+        missing = client.post(
+            "/incidents/00000000-0000-0000-0000-00000000ffff/resolve", json={}
+        )
         assert missing.status_code == 404
 
-        conflict = client.post(f"/incidents/{open_incident.id}/resolve", json={"resolved_by": "bob"})
+        conflict = client.post(
+            f"/incidents/{open_incident.id}/resolve", json={"resolved_by": "bob"}
+        )
         assert conflict.status_code == 409
     finally:
         main.app.dependency_overrides.pop(main.get_db, None)
@@ -1603,9 +1716,22 @@ def test_voice_callback_ack_is_idempotent(client):
     fake_session = FakeVoiceSession([incident], [notification])
     main.app.dependency_overrides[main.get_db] = lambda: fake_session
     try:
+        body = b"Digits=1"
+        timestamp = str(int(time.time()))
+        signature = hmac.new(
+            os.environ.get("VOICE_WEBHOOK_SECRET", "").encode("utf-8"),
+            f"{timestamp}.".encode("utf-8") + body,
+            hashlib.sha256,
+        ).hexdigest()
+        headers = {
+            "X-Voice-Timestamp": timestamp,
+            "X-Voice-Signature": signature,
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
         first = client.post(
             f"/dispatch/voice/callback/{notification.id}",
-            data={"Digits": "1"},
+            content=body,
+            headers=headers,
         )
         assert first.status_code == 200
         first_ack_at = incident.acknowledged_at
@@ -1616,18 +1742,23 @@ def test_voice_callback_ack_is_idempotent(client):
 
         second = client.post(
             f"/dispatch/voice/callback/{notification.id}",
-            data={"Digits": "1"},
+            content=body,
+            headers=headers,
         )
         assert second.status_code == 200
         assert incident.status == models.IncidentStatus.ACKNOWLEDGED
         assert incident.acknowledged_by == notification.contact_id
         assert incident.acknowledged_at == first_ack_at
         assert notification.status == models.NotificationStatus.ANSWERED_VOICE
-        assert sum(
-            1
-            for obj in fake_session.added_objects
-            if isinstance(obj, models.AuditLog) and obj.action == models.AuditAction.ACK_RECEIVED
-        ) == 1
+        assert (
+            sum(
+                1
+                for obj in fake_session.added_objects
+                if isinstance(obj, models.AuditLog)
+                and obj.action == models.AuditAction.ACK_RECEIVED
+            )
+            == 1
+        )
     finally:
         main.app.dependency_overrides.pop(main.get_db, None)
 
@@ -1662,7 +1793,10 @@ def test_generate_prerecorded_twiml_success(client):
         assert response.status_code == 200
         payload = response.text
         assert "<Play>https://cdn.example.com/incident-alert.mp3</Play>" in payload
-        assert f'action="{main.APP_BASE_URL}/dispatch/voice/callback/{notification.id}"' in payload
+        assert (
+            f'action="{main.APP_BASE_URL}/dispatch/voice/callback/{notification.id}"'
+            in payload
+        )
         assert any(
             isinstance(obj, models.AuditLog)
             and obj.action == models.AuditAction.TWIML_GENERATED
@@ -1678,7 +1812,9 @@ def test_generate_prerecorded_twiml_requires_audio_url(client):
     original_audio_url = main.VOICE_PRERECORDED_AUDIO_URL
     main.VOICE_PRERECORDED_AUDIO_URL = ""
     try:
-        response = client.get("/dispatch/voice/twiml/prerecorded/00000000-0000-0000-0000-00000000c211")
+        response = client.get(
+            "/dispatch/voice/twiml/prerecorded/00000000-0000-0000-0000-00000000c211"
+        )
         assert response.status_code == 503
         assert response.json()["detail"] == "Pre-recorded audio URL is not configured"
     finally:
@@ -1791,7 +1927,9 @@ def test_get_incident_timeline_filter_action(client):
     fake_session = FakeLifecycleSession([incident], audit_logs=audit_logs)
     main.app.dependency_overrides[main.get_db] = lambda: fake_session
     try:
-        response = client.get(f"/incidents/{incident.id}/timeline?action=EVENT_RECEIVED&limit=10&offset=0")
+        response = client.get(
+            f"/incidents/{incident.id}/timeline?action=EVENT_RECEIVED&limit=10&offset=0"
+        )
         assert response.status_code == 200
         payload = response.json()
         assert payload["total"] == 2
@@ -1825,7 +1963,9 @@ def test_get_incident_timeline_limit_above_max(client):
     fake_session = FakeLifecycleSession([incident], audit_logs=[])
     main.app.dependency_overrides[main.get_db] = lambda: fake_session
     try:
-        response = client.get(f"/incidents/{incident.id}/timeline?limit={main.OPS_ENDPOINT_MAX_LIMIT + 1}")
+        response = client.get(
+            f"/incidents/{incident.id}/timeline?limit={main.OPS_ENDPOINT_MAX_LIMIT + 1}"
+        )
         assert response.status_code == 400
     finally:
         main.app.dependency_overrides.pop(main.get_db, None)
@@ -1835,7 +1975,9 @@ def test_get_incident_timeline_not_found(client):
     fake_session = FakeLifecycleSession([], audit_logs=[])
     main.app.dependency_overrides[main.get_db] = lambda: fake_session
     try:
-        response = client.get("/incidents/00000000-0000-0000-0000-00000000ffff/timeline")
+        response = client.get(
+            "/incidents/00000000-0000-0000-0000-00000000ffff/timeline"
+        )
         assert response.status_code == 404
     finally:
         main.app.dependency_overrides.pop(main.get_db, None)
@@ -1885,7 +2027,9 @@ def test_list_rules_filters_and_pagination(client):
     fake_session = FakeRuleSession(rules, [group_a, group_b])
     main.app.dependency_overrides[main.get_db] = lambda: fake_session
 
-    response = client.get(f"/rules?active=true&recipient_group_id={group_a.id}&limit=1&offset=0")
+    response = client.get(
+        f"/rules?active=true&recipient_group_id={group_a.id}&limit=1&offset=0"
+    )
 
     assert response.status_code == 200
     payload = response.json()
@@ -1926,7 +2070,10 @@ def test_create_rule_with_valid_fallback_policy(client):
         assert response.status_code == 200
         payload = response.json()
         assert payload["rule_name"] == "rule-create"
-        assert payload["fallback_policy_json"]["escalation_group_id"] == "00000000-0000-0000-0000-00000000aa02"
+        assert (
+            payload["fallback_policy_json"]["escalation_group_id"]
+            == "00000000-0000-0000-0000-00000000aa02"
+        )
         assert payload["fallback_policy_json"]["channels"] == ["telegram", "email"]
     finally:
         main.app.dependency_overrides.pop(main.get_db, None)
@@ -2024,7 +2171,9 @@ def test_update_rule_and_toggle(client):
         ),
     ],
 )
-def test_create_rule_fallback_policy_validation_errors(client, payload, expected_fragment):
+def test_create_rule_fallback_policy_validation_errors(
+    client, payload, expected_fragment
+):
     response = client.post("/rules", json=payload)
     assert response.status_code == 422
     detail = response.json()["detail"]
@@ -2058,7 +2207,9 @@ def test_create_rule_fallback_policy_validation_errors(client, payload, expected
         ),
     ],
 )
-def test_update_rule_fallback_policy_validation_errors(client, payload, expected_fragment):
+def test_update_rule_fallback_policy_validation_errors(
+    client, payload, expected_fragment
+):
     group = GroupFixture(id="00000000-0000-0000-0000-00000000aa20", name="group-aa20")
     rule = RuleFixture(
         id="00000000-0000-0000-0000-000000000221",
@@ -2103,7 +2254,9 @@ def test_update_rule_errors(client):
     invalid_id = client.patch("/rules/not-a-uuid", json={"rule_name": "x"})
     assert invalid_id.status_code == 400
 
-    not_found = client.patch("/rules/00000000-0000-0000-0000-000000000999", json={"rule_name": "x"})
+    not_found = client.patch(
+        "/rules/00000000-0000-0000-0000-000000000999", json={"rule_name": "x"}
+    )
     assert not_found.status_code == 404
 
     missing_group = client.patch(

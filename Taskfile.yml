@@ -1,0 +1,31 @@
+version: "3"
+
+tasks:
+  install:
+    desc: Install runtime + dev dependencies
+    cmds:
+      - .venv/Scripts/python.exe -m pip install -r requirements.txt
+      - .venv/Scripts/python.exe -m pip install -r requirements-dev.txt
+
+  lock:
+    desc: Rebuild dev lockfile using pip-tools
+    cmds:
+      - .venv/Scripts/python.exe -m piptools compile requirements-dev.in -o requirements-dev.txt
+
+  test:
+    desc: Run test suite
+    cmds:
+      - .venv/Scripts/python.exe -m pytest tests -q
+
+  lint:
+    desc: Run linters and formatting checks
+    cmds:
+      - .venv/Scripts/python.exe -m ruff check .
+      - .venv/Scripts/python.exe -m black --check .
+
+  ci:
+    desc: Run local CI checks
+    cmds:
+      - .venv/Scripts/python.exe -m compileall alembic config.py database.py engine.py main.py models.py redis_client.py schemas.py worker.py tests
+      - .venv/Scripts/python.exe -m pytest tests -q
+      - .venv/Scripts/python.exe -m alembic -c alembic.ini upgrade head --sql
