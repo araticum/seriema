@@ -7,6 +7,7 @@ import time
 import re
 from urllib.parse import urlencode
 from urllib.request import Request as UrlRequest, urlopen
+from urllib.error import URLError, HTTPError
 from datetime import datetime, timezone, timedelta
 from typing import cast as typing_cast, Literal as typing_Literal
 from fastapi import FastAPI, Depends, HTTPException, Request, Response, Query, Header
@@ -48,6 +49,7 @@ from .config import (
     OASIS_RADAR_LOKI_URL,
     OASIS_RADAR_LOGQL_QUERY,
     OASIS_RADAR_LOOKBACK_SECONDS,
+    OASIS_RADAR_CURSOR_KEY,
     OASIS_RADAR_PULL_LIMIT,
     queue_name,
     prefixed_redis_key,
@@ -532,7 +534,19 @@ def _fetch_oasis_radar_entries(
         return []
 
     end_ns = int(time.time() * 1_000_000_000)
-    start_ns = end_ns - max(1, lookback_seconds) * 1_000_000_000
+    lookback_start_ns = end_ns - max(1, lookback_seconds) * 1_000_000_000
+    cursor_raw = redis_conn.get(prefixed_redis_key(OASIS_RADAR_CURSOR_KEY))
+    cursor_ns = 0
+    if cursor_raw is not None:
+        try:
+            cursor_ns = int(
+                cursor_raw.decode("utf-8")
+                if isinstance(cursor_raw, bytes)
+                else cursor_raw
+            )
+        except (TypeError, ValueError):
+            cursor_ns = 0
+    start_ns = max(lookback_start_ns, cursor_ns + 1)
     encoded_query = urlencode(
         {
             "query": query,
@@ -547,8 +561,20 @@ def _fetch_oasis_radar_entries(
     )
     request = UrlRequest(endpoint, method="GET")
 
-    with urlopen(request, timeout=15) as response:
-        raw = response.read().decode("utf-8")
+    raw = ""
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            with urlopen(request, timeout=15) as response:
+                raw = response.read().decode("utf-8")
+            last_error = None
+            break
+        except Exception as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(0.5 * (2**attempt))
+    if last_error is not None:
+        raise last_error
     parsed = json.loads(raw)
     result = parsed.get("data", {}).get("result", [])
 
@@ -566,6 +592,69 @@ def _fetch_oasis_radar_entries(
                 }
             )
     return entries
+
+
+def _oasis_radar_service(labels: dict[str, object]) -> str:
+    for key in ("compose_service", "service", "app", "job", "container"):
+        value = labels.get(key)
+        if value:
+            return str(value)
+    return "oasis-radar"
+
+
+def _oasis_radar_severity(line: str, labels: dict[str, object]) -> str:
+    for key in ("level", "severity", "log_level"):
+        value = labels.get(key)
+        if value:
+            level = str(value).lower()
+            if level in {"fatal", "critical", "crit", "panic", "emergency", "alert"}:
+                return "CRITICAL"
+            if level in {"error", "err"}:
+                return "ERROR"
+            if level in {"warning", "warn"}:
+                return "WARN"
+            if level in {"info", "information"}:
+                return "INFO"
+
+    candidate = line
+    try:
+        if line.startswith("{"):
+            parsed = json.loads(line)
+            if isinstance(parsed, dict):
+                for key in ("level", "severity", "log_level", "status"):
+                    value = parsed.get(key)
+                    if value:
+                        candidate = str(value)
+                        break
+    except Exception:
+        pass
+
+    text = candidate.lower()
+    if re.search(r"(fatal|critical|panic|emergency|alert)", text):
+        return "CRITICAL"
+    if re.search(r"(error|exception|fail(ed|ure)?)", text):
+        return "ERROR"
+    if re.search(r"(warn|warning)", text):
+        return "WARN"
+    return "INFO"
+
+
+def _check_oasis_radar_connectivity() -> tuple[bool, str]:
+    if not OASIS_RADAR_ENABLED:
+        return False, "disabled"
+    endpoint = f"{OASIS_RADAR_LOKI_URL.rstrip('/')}/ready"
+    try:
+        request = UrlRequest(endpoint, method="GET")
+        with urlopen(request, timeout=5) as response:
+            if int(response.status) >= 400:
+                return False, f"http_{response.status}"
+        return True, "ok"
+    except HTTPError as exc:
+        return False, f"http_{exc.code}"
+    except URLError as exc:
+        return False, f"network:{exc.reason}"
+    except Exception as exc:
+        return False, str(exc)
 
 
 @app.get("/health")
@@ -670,17 +759,23 @@ def health_integrations():
             ),
         )
     )
-    integrations.append(
-        schemas.IntegrationStatusDetail(
-            name="oasis-radar",
-            status="ok" if OASIS_RADAR_ENABLED else "disabled",
-            detail=(
-                OASIS_RADAR_LOKI_URL
-                if OASIS_RADAR_ENABLED
-                else "OASIS_RADAR_ENABLED=false"
-            ),
+    if OASIS_RADAR_ENABLED:
+        oasis_ok, oasis_detail = _check_oasis_radar_connectivity()
+        integrations.append(
+            schemas.IntegrationStatusDetail(
+                name="oasis-radar",
+                status="ok" if oasis_ok else "down",
+                detail=f"{OASIS_RADAR_LOKI_URL} ({oasis_detail})",
+            )
         )
-    )
+    else:
+        integrations.append(
+            schemas.IntegrationStatusDetail(
+                name="oasis-radar",
+                status="disabled",
+                detail="OASIS_RADAR_ENABLED=false",
+            )
+        )
 
     statuses = {item.status for item in integrations}
     overall: str
@@ -843,23 +938,75 @@ def pull_oasis_radar(
     _require_admin_token(x_admin_token)
     _validate_ops_limit(limit)
 
-    entries = _fetch_oasis_radar_entries(
-        query=OASIS_RADAR_LOGQL_QUERY,
-        lookback_seconds=lookback_seconds,
-        limit=limit,
-    )
+    metrics_key = prefixed_redis_key(METRICS_KEY)
+    try:
+        entries = _fetch_oasis_radar_entries(
+            query=OASIS_RADAR_LOGQL_QUERY,
+            lookback_seconds=lookback_seconds,
+            limit=limit,
+        )
+    except HTTPError as exc:
+        redis_conn.hincrby(metrics_key, "oasis_radar_pull_failed_total", 1)
+        redis_conn.hset(metrics_key, "oasis_radar_pull_last_status", "http_error")
+        notify_exception(
+            exc,
+            {
+                "stage": "oasis_radar_pull",
+                "lookback_seconds": lookback_seconds,
+                "limit": limit,
+            },
+        )
+        raise HTTPException(
+            status_code=502, detail=f"Oasis Radar HTTP error: {exc.code}"
+        ) from exc
+    except URLError as exc:
+        redis_conn.hincrby(metrics_key, "oasis_radar_pull_failed_total", 1)
+        redis_conn.hset(
+            metrics_key, "oasis_radar_pull_last_status", "connectivity_error"
+        )
+        notify_exception(
+            exc,
+            {
+                "stage": "oasis_radar_pull",
+                "lookback_seconds": lookback_seconds,
+                "limit": limit,
+            },
+        )
+        raise HTTPException(
+            status_code=502, detail=f"Oasis Radar connectivity error: {exc.reason}"
+        ) from exc
+    except Exception as exc:
+        redis_conn.hincrby(metrics_key, "oasis_radar_pull_failed_total", 1)
+        redis_conn.hset(metrics_key, "oasis_radar_pull_last_status", "unexpected_error")
+        notify_exception(
+            exc,
+            {
+                "stage": "oasis_radar_pull",
+                "lookback_seconds": lookback_seconds,
+                "limit": limit,
+            },
+        )
+        raise HTTPException(
+            status_code=500, detail="Unexpected Oasis Radar pull error"
+        ) from exc
+
     if not entries:
+        redis_conn.hincrby(metrics_key, "oasis_radar_pull_success_total", 1)
+        redis_conn.hset(metrics_key, "oasis_radar_pull_last_status", "ok")
         return {"status": "ok", "fetched": 0, "accepted": 0, "duplicates": 0}
 
     accepted = 0
     duplicates = 0
+    max_timestamp_ns = 0
     for entry in entries:
         labels = entry.get("labels", {})
         line = str(entry.get("line", "")).strip()
         timestamp_ns = str(entry.get("timestamp_ns", ""))
-        service = (
-            labels.get("compose_service") or labels.get("container") or "oasis-radar"
-        )
+        try:
+            max_timestamp_ns = max(max_timestamp_ns, int(timestamp_ns))
+        except (TypeError, ValueError):
+            pass
+        service = _oasis_radar_service(labels if isinstance(labels, dict) else {})
         dedupe_key = hashlib.sha256(
             f"{timestamp_ns}:{service}:{line}".encode("utf-8")
         ).hexdigest()
@@ -868,22 +1015,34 @@ def pull_oasis_radar(
             duplicates += 1
             continue
 
-        severity = (
-            "CRITICAL"
-            if re.search(r"(error|fatal|critical|panic)", line, re.IGNORECASE)
-            else "WARN"
+        severity = _oasis_radar_severity(
+            line, labels if isinstance(labels, dict) else {}
         )
         event = schemas.EventIncoming(
             external_event_id=f"oasis-radar-{timestamp_ns}-{service}",
             source=f"oasis-radar:{service}",
             severity=severity,
+            service=service,
             title=f"Oasis Radar signal from {service}",
             message=line[:5000],
             payload_json={"labels": labels, "timestamp_ns": timestamp_ns},
+            schedule_at=None,
             dedupe_key=dedupe_key,
         )
         ingest_event(event=event, db=db)
         accepted += 1
+
+    if max_timestamp_ns > 0:
+        redis_conn.set(
+            prefixed_redis_key(OASIS_RADAR_CURSOR_KEY), str(max_timestamp_ns)
+        )
+    redis_conn.hincrby(metrics_key, "oasis_radar_pull_success_total", 1)
+    redis_conn.hincrby(metrics_key, "oasis_radar_entries_fetched_total", len(entries))
+    redis_conn.hincrby(metrics_key, "oasis_radar_entries_ingested_total", accepted)
+    redis_conn.hset(metrics_key, "oasis_radar_pull_last_status", "ok")
+    redis_conn.hset(metrics_key, "oasis_radar_pull_last_fetched", len(entries))
+    redis_conn.hset(metrics_key, "oasis_radar_pull_last_accepted", accepted)
+    redis_conn.hset(metrics_key, "oasis_radar_pull_last_duplicates", duplicates)
 
     notify_event(
         "seriema.oasis_radar.pull",

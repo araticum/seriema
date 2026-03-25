@@ -110,6 +110,15 @@ OASIS_RADAR_PULL_ENABLED = (
 OASIS_RADAR_PULL_INTERVAL_SECONDS = int(
     os.getenv("OASIS_RADAR_PULL_INTERVAL_SECONDS", "60")
 )
+OASIS_RADAR_CURSOR_KEY = os.getenv(
+    "OASIS_RADAR_CURSOR_KEY", "integrations:oasis_radar:last_timestamp_ns"
+)
+OASIS_RADAR_PULL_FAILURES_KEY = os.getenv(
+    "OASIS_RADAR_PULL_FAILURES_KEY", "integrations:oasis_radar:pull_failures"
+)
+OASIS_RADAR_PULL_FAILURE_ALERT_THRESHOLD = int(
+    os.getenv("OASIS_RADAR_PULL_FAILURE_ALERT_THRESHOLD", "3")
+)
 
 
 def queue_name(suffix: str) -> str:

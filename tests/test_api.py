@@ -660,6 +660,56 @@ def test_health_deps_down(client, monkeypatch):
     assert payload["overall"] == "down"
 
 
+def test_oasis_radar_service_mapping():
+    assert main._oasis_radar_service({"compose_service": "payments"}) == "payments"
+    assert main._oasis_radar_service({"service": "api"}) == "api"
+    assert main._oasis_radar_service({}) == "oasis-radar"
+
+
+def test_oasis_radar_severity_mapping():
+    assert main._oasis_radar_severity('{"level":"error"}', {}) == "ERROR"
+    assert main._oasis_radar_severity("panic in worker", {}) == "CRITICAL"
+    assert main._oasis_radar_severity("warn threshold reached", {}) == "WARN"
+    assert main._oasis_radar_severity("normal heartbeat", {}) == "INFO"
+
+
+def test_oasis_radar_pull_error_updates_metrics(client, monkeypatch):
+    class RadarRedis:
+        def __init__(self):
+            self.hash = {}
+
+        def hincrby(self, key, field, value):
+            current = int(self.hash.get(field, 0))
+            self.hash[field] = current + int(value)
+            return self.hash[field]
+
+        def hset(self, key, field, value):
+            self.hash[field] = value
+            return 1
+
+    fake_redis = RadarRedis()
+    fake_session = FakeSession(queries=[])
+    main.app.dependency_overrides[main.get_db] = lambda: fake_session
+    monkeypatch.setattr(main, "redis_conn", fake_redis)
+
+    from urllib.error import URLError
+
+    monkeypatch.setattr(
+        main,
+        "_fetch_oasis_radar_entries",
+        lambda query, lookback_seconds, limit: (_ for _ in ()).throw(
+            URLError("network down")
+        ),
+    )
+    try:
+        response = client.post("/integrations/oasis-radar/pull")
+        assert response.status_code == 502
+        assert fake_redis.hash["oasis_radar_pull_failed_total"] == 1
+        assert fake_redis.hash["oasis_radar_pull_last_status"] == "connectivity_error"
+    finally:
+        main.app.dependency_overrides.pop(main.get_db, None)
+
+
 def test_ingest_event_duplicate_records_duplicate_audit(client, monkeypatch):
     fake_session = FakeLifecycleSession([], audit_logs=[])
     main.app.dependency_overrides[main.get_db] = lambda: fake_session

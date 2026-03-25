@@ -127,6 +127,7 @@ powershell -ExecutionPolicy Bypass -File scripts/smoke_e2e_handoff.ps1
 
 - `GET /ops/integration/status`
 - `GET /ops/readiness`
+- `GET /health/integrations`
 
 ### DLQ
 
@@ -166,6 +167,39 @@ Para Twilio (alternativa compatível):
 - `PATCH /rules/{rule_id}`
 - `POST /rules/{rule_id}/toggle`
 - `POST /rules/{rule_id}/simulate`
+
+## Integracao Radar -> Seriema
+
+Endpoints:
+
+- `POST /integrations/oasis-radar/pull`
+- worker periodico: `oasis_radar_pull_worker`
+
+Variaveis principais:
+
+```bash
+OASIS_RADAR_ENABLED=true
+OASIS_RADAR_PULL_ENABLED=true
+OASIS_RADAR_LOKI_URL=http://loki:3100
+OASIS_RADAR_LOGQL_QUERY={compose_service=~".+"}
+OASIS_RADAR_LOOKBACK_SECONDS=300
+OASIS_RADAR_PULL_LIMIT=100
+OASIS_RADAR_PULL_INTERVAL_SECONDS=60
+OASIS_RADAR_CURSOR_KEY=integrations:oasis_radar:last_timestamp_ns
+OASIS_RADAR_PULL_FAILURES_KEY=integrations:oasis_radar:pull_failures
+OASIS_RADAR_PULL_FAILURE_ALERT_THRESHOLD=3
+```
+
+Runbook curto:
+
+1. Verifique `GET /health/integrations` e confirme `oasis-radar: ok`.
+2. Execute `POST /integrations/oasis-radar/pull` manualmente para validar ingestao.
+3. Confira `GET /metrics/ops` e valide chaves:
+   `oasis_radar_pull_success_total`, `oasis_radar_pull_failed_total`,
+   `oasis_radar_entries_fetched_total`, `oasis_radar_entries_ingested_total`.
+4. Se houver falha repetida, revisar `OASIS_RADAR_LOKI_URL` e `OASIS_RADAR_LOGQL_QUERY`.
+5. Em incidente de duplicacao excessiva, revisar cursor:
+   `OASIS_RADAR_CURSOR_KEY` (Redis).
 
 ### Contacts
 

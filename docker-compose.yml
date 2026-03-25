@@ -58,6 +58,9 @@ services:
       OASIS_RADAR_LOOKBACK_SECONDS: "300"
       OASIS_RADAR_PULL_LIMIT: "100"
       OASIS_RADAR_PULL_INTERVAL_SECONDS: "60"
+      OASIS_RADAR_CURSOR_KEY: integrations:oasis_radar:last_timestamp_ns
+      OASIS_RADAR_PULL_FAILURES_KEY: integrations:oasis_radar:pull_failures
+      OASIS_RADAR_PULL_FAILURE_ALERT_THRESHOLD: "3"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health/deps"]
       interval: 10s
@@ -108,6 +111,9 @@ services:
       OASIS_RADAR_LOOKBACK_SECONDS: "300"
       OASIS_RADAR_PULL_LIMIT: "100"
       OASIS_RADAR_PULL_INTERVAL_SECONDS: "60"
+      OASIS_RADAR_CURSOR_KEY: integrations:oasis_radar:last_timestamp_ns
+      OASIS_RADAR_PULL_FAILURES_KEY: integrations:oasis_radar:pull_failures
+      OASIS_RADAR_PULL_FAILURE_ALERT_THRESHOLD: "3"
     labels:
       - "compose_project=seriema"
       - "compose_service=worker"

@@ -51,6 +51,8 @@ from .config import (
     SIGNALWIRE_API_TOKEN,
     SIGNALWIRE_FROM_NUMBER,
     OASIS_RADAR_PULL_ENABLED,
+    OASIS_RADAR_PULL_FAILURES_KEY,
+    OASIS_RADAR_PULL_FAILURE_ALERT_THRESHOLD,
     OASIS_RADAR_PULL_INTERVAL_SECONDS,
     OASIS_RADAR_PULL_LIMIT,
     OASIS_RADAR_LOOKBACK_SECONDS,
@@ -304,11 +306,37 @@ def _pull_oasis_radar_impl(limit: int | None = None) -> dict:
         method="POST",
         headers={"X-Admin-Token": admin_token},
     )
-    with urlopen(request, timeout=20) as response:
-        payload = response.read().decode("utf-8")
-        parsed = json.loads(payload)
-    notify_event("seriema.oasis_radar.pull_worker", parsed)
-    return parsed
+    try:
+        with urlopen(request, timeout=20) as response:
+            payload = response.read().decode("utf-8")
+            parsed = json.loads(payload)
+        redis_conn.delete(prefixed_redis_key(OASIS_RADAR_PULL_FAILURES_KEY))
+        notify_event("seriema.oasis_radar.pull_worker", parsed)
+        return parsed
+    except Exception as exc:
+        failures = int(
+            redis_conn.incr(prefixed_redis_key(OASIS_RADAR_PULL_FAILURES_KEY))
+        )
+        if failures == 1:
+            redis_conn.expire(
+                prefixed_redis_key(OASIS_RADAR_PULL_FAILURES_KEY),
+                max(300, OASIS_RADAR_PULL_INTERVAL_SECONDS * 10),
+            )
+        level = (
+            "critical"
+            if failures >= OASIS_RADAR_PULL_FAILURE_ALERT_THRESHOLD
+            else "error"
+        )
+        notify_event(
+            "seriema.oasis_radar.pull_worker_failed",
+            {
+                "failures": failures,
+                "threshold": OASIS_RADAR_PULL_FAILURE_ALERT_THRESHOLD,
+                "error": str(exc),
+            },
+            level=level,
+        )
+        raise
 
 
 def _dispatch_voice_provider(
