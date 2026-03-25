@@ -44,6 +44,10 @@ from .config import (
     TWILIO_ACCOUNT_SID,
     TWILIO_AUTH_TOKEN,
     TWILIO_FROM_NUMBER,
+    SIGNALWIRE_SPACE_URL,
+    SIGNALWIRE_PROJECT_ID,
+    SIGNALWIRE_API_TOKEN,
+    SIGNALWIRE_FROM_NUMBER,
     queue_name,
     prefixed_redis_key,
 )
@@ -120,7 +124,15 @@ def _voice_twiml_url(notification_id: str) -> str:
     return f"{APP_BASE_URL}/dispatch/voice/twiml/{notification_id}"
 
 
-def _call_provider_voice(endpoint: str, account_id: str, auth_token: str, from_number: str, contact_phone: str, twiml_url: str, provider_label: str) -> str:
+def _call_provider_voice(
+    endpoint: str,
+    account_id: str,
+    auth_token: str,
+    from_number: str,
+    contact_phone: str,
+    twiml_url: str,
+    provider_label: str,
+) -> str:
     if not all([account_id, auth_token, from_number]):
         raise RuntimeError(f"{provider_label} credentials are not configured")
 
@@ -132,7 +144,9 @@ def _call_provider_voice(endpoint: str, account_id: str, auth_token: str, from_n
             "Method": "POST",
         }
     ).encode("utf-8")
-    basic_auth = base64.b64encode(f"{account_id}:{auth_token}".encode("utf-8")).decode("ascii")
+    basic_auth = base64.b64encode(f"{account_id}:{auth_token}".encode("utf-8")).decode(
+        "ascii"
+    )
     request = Request(
         endpoint,
         data=payload,
@@ -153,7 +167,9 @@ def _call_provider_voice(endpoint: str, account_id: str, auth_token: str, from_n
 
 
 def _call_twilio_voice(contact_phone: str, twiml_url: str) -> str:
-    endpoint = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Calls.json"
+    endpoint = (
+        f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Calls.json"
+    )
     return _call_provider_voice(
         endpoint=endpoint,
         account_id=TWILIO_ACCOUNT_SID,
@@ -173,7 +189,9 @@ def _call_signalwire_voice(contact_phone: str, twiml_url: str) -> str:
     if not space.startswith("http://") and not space.startswith("https://"):
         space = f"https://{space}"
 
-    endpoint = f"{space}/api/laml/2010-04-01/Accounts/{SIGNALWIRE_PROJECT_ID}/Calls.json"
+    endpoint = (
+        f"{space}/api/laml/2010-04-01/Accounts/{SIGNALWIRE_PROJECT_ID}/Calls.json"
+    )
     return _call_provider_voice(
         endpoint=endpoint,
         account_id=SIGNALWIRE_PROJECT_ID,
@@ -195,8 +213,13 @@ def _dispatch_voice_provider(db: Session, notification: Notification) -> str | N
         raise RuntimeError("Contact phone is not available for voice dispatch")
 
     if provider == "twilio":
-        return _call_twilio_voice(str(contact.phone), _voice_twiml_url(str(notification.id)))
-    return _call_signalwire_voice(str(contact.phone), _voice_twiml_url(str(notification.id)))
+        return _call_twilio_voice(
+            str(contact.phone), _voice_twiml_url(str(notification.id))
+        )
+    return _call_signalwire_voice(
+        str(contact.phone), _voice_twiml_url(str(notification.id))
+    )
+
 
 def _notification_is_terminal(notification: Notification) -> bool:
     return notification.status in {
@@ -223,7 +246,11 @@ def _channel_rate_limit_key(
     window_seconds: int | None = None,
     now_epoch: int | None = None,
 ) -> str:
-    window = CHANNEL_RATE_LIMIT_WINDOW_SECONDS if window_seconds is None else max(1, int(window_seconds))
+    window = (
+        CHANNEL_RATE_LIMIT_WINDOW_SECONDS
+        if window_seconds is None
+        else max(1, int(window_seconds))
+    )
     epoch = int(time.time()) if now_epoch is None else int(now_epoch)
     bucket = epoch // window
     return prefixed_redis_key(f"rl:{_channel_name(channel).lower()}:{bucket}")
@@ -245,7 +272,9 @@ def _open_channel_circuit(channel: NotificationChannel | str) -> None:
     pipe.execute()
 
 
-def _record_channel_failure(channel: NotificationChannel | str) -> dict[str, int | bool | str]:
+def _record_channel_failure(
+    channel: NotificationChannel | str,
+) -> dict[str, int | bool | str]:
     channel_name = _channel_name(channel)
     failures = redis_conn.incr(_channel_circuit_failure_key(channel_name))
     opened = failures >= CB_FAILURE_THRESHOLD
@@ -266,8 +295,16 @@ def _channel_rate_limit_exceeded(
     window_seconds: int | None = None,
     now_epoch: int | None = None,
 ) -> dict[str, int | bool | str]:
-    limit = CHANNEL_RATE_LIMIT_PER_MINUTE if limit_per_minute is None else max(1, int(limit_per_minute))
-    window = CHANNEL_RATE_LIMIT_WINDOW_SECONDS if window_seconds is None else max(1, int(window_seconds))
+    limit = (
+        CHANNEL_RATE_LIMIT_PER_MINUTE
+        if limit_per_minute is None
+        else max(1, int(limit_per_minute))
+    )
+    window = (
+        CHANNEL_RATE_LIMIT_WINDOW_SECONDS
+        if window_seconds is None
+        else max(1, int(window_seconds))
+    )
     key = _channel_rate_limit_key(channel, window_seconds=window, now_epoch=now_epoch)
     count = redis_conn.incr(key)
     if count == 1:
@@ -320,7 +357,9 @@ def _refresh_dlq_metric() -> None:
     _touch_metrics({"dlq_size": redis_conn.llen(DLQ_REDIS_KEY)})
 
 
-def _record_periodic_task_heartbeat(task_name: str, started_monotonic: float, status: str) -> None:
+def _record_periodic_task_heartbeat(
+    task_name: str, started_monotonic: float, status: str
+) -> None:
     duration_ms = max(0, int((time.monotonic() - started_monotonic) * 1000))
     _touch_metrics(
         {
@@ -357,7 +396,9 @@ def _write_dlq_replay_report(
             "remaining": int(remaining),
             "dry_run": int(bool(dry_run)),
             "locked": int(bool(locked)),
-            "candidates_count": "" if candidates_count is None else int(candidates_count),
+            "candidates_count": (
+                "" if candidates_count is None else int(candidates_count)
+            ),
             "error_message": error_message or "",
         },
     )
@@ -470,7 +511,9 @@ def _get_or_create_notification(
     return notification, True
 
 
-def _queue_channel_send(notification_id: str, trace_id: str, channel: NotificationChannel) -> None:
+def _queue_channel_send(
+    notification_id: str, trace_id: str, channel: NotificationChannel
+) -> None:
     task_map = {
         NotificationChannel.VOICE: send_voice_call,
         NotificationChannel.TELEGRAM: send_telegram_message,
@@ -520,7 +563,9 @@ def _dlq_payload(
     }
 
 
-def _push_dlq_entry(task_name: str, args: tuple, kwargs: dict, exception: Exception | str) -> dict:
+def _push_dlq_entry(
+    task_name: str, args: tuple, kwargs: dict, exception: Exception | str
+) -> dict:
     payload = _dlq_payload(task_name, args, kwargs, exception)
     redis_conn.rpush(DLQ_REDIS_KEY, json.dumps(payload, sort_keys=True))
     _trim_dlq_to_limit()
@@ -576,7 +621,9 @@ def _record_final_failure(
         db.close()
 
 
-def _handle_task_final_failure(task_name: str, args: tuple, kwargs: dict, exception: Exception) -> None:
+def _handle_task_final_failure(
+    task_name: str, args: tuple, kwargs: dict, exception: Exception
+) -> None:
     payload = _push_dlq_entry(task_name, args, kwargs, exception)
     _record_final_failure(task_name, payload)
 
@@ -593,7 +640,12 @@ def _on_task_failure(
     **extra,
 ):
     task_name = getattr(sender, "name", None) or str(sender or "")
-    if task_name not in {"voice_worker", "telegram_worker", "email_worker", "escalation_worker"}:
+    if task_name not in {
+        "voice_worker",
+        "telegram_worker",
+        "email_worker",
+        "escalation_worker",
+    }:
         return
 
     # For autoretry tasks, only send to DLQ when retries are exhausted.
@@ -604,7 +656,12 @@ def _on_task_failure(
     if max_retries is not None and request_retries < max_retries:
         return
 
-    _handle_task_final_failure(task_name, tuple(args or ()), dict(kwargs or {}), exception or Exception("task failed"))
+    _handle_task_final_failure(
+        task_name,
+        tuple(args or ()),
+        dict(kwargs or {}),
+        exception or Exception("task failed"),
+    )
 
 
 def _mark_notification_sent(
@@ -668,7 +725,9 @@ def _send_notification_channel_impl(
                 "trace_id": trace_id,
             }
 
-        if channel_name in {"VOICE", "TELEGRAM", "EMAIL"} and _channel_is_circuit_open(channel_name):
+        if channel_name in {"VOICE", "TELEGRAM", "EMAIL"} and _channel_is_circuit_open(
+            channel_name
+        ):
             return {
                 "status": "skipped_circuit",
                 "channel": channel_name,
@@ -711,7 +770,9 @@ def _send_notification_channel_impl(
         if channel_name == "VOICE":
             provider_id = _dispatch_voice_provider(db, notification)
 
-        sent = _mark_notification_sent(db, notification_id, trace_id, channel_name, provider_id=provider_id)
+        sent = _mark_notification_sent(
+            db, notification_id, trace_id, channel_name, provider_id=provider_id
+        )
         if sent:
             return {
                 "status": "sent",
@@ -741,7 +802,11 @@ def dispatch_incident(incident_id: str, incoming_trace_id: str):
         if not rule:
             return
 
-        group_members = db.query(GroupMember).filter(GroupMember.group_id == rule.recipient_group_id).all()
+        group_members = (
+            db.query(GroupMember)
+            .filter(GroupMember.group_id == rule.recipient_group_id)
+            .all()
+        )
         channels = rule.channels
 
         created_notifications = []
@@ -776,11 +841,17 @@ def dispatch_incident(incident_id: str, incoming_trace_id: str):
             db.commit()
 
             if notif.channel == NotificationChannel.VOICE:
-                _queue_channel_send(str(notif.id), incoming_trace_id, NotificationChannel.VOICE)
+                _queue_channel_send(
+                    str(notif.id), incoming_trace_id, NotificationChannel.VOICE
+                )
             elif notif.channel == NotificationChannel.TELEGRAM:
-                _queue_channel_send(str(notif.id), incoming_trace_id, NotificationChannel.TELEGRAM)
+                _queue_channel_send(
+                    str(notif.id), incoming_trace_id, NotificationChannel.TELEGRAM
+                )
             elif notif.channel == NotificationChannel.EMAIL:
-                _queue_channel_send(str(notif.id), incoming_trace_id, NotificationChannel.EMAIL)
+                _queue_channel_send(
+                    str(notif.id), incoming_trace_id, NotificationChannel.EMAIL
+                )
     finally:
         db.close()
 
@@ -797,11 +868,15 @@ def dispatch_incident(incident_id: str, incoming_trace_id: str):
     time_limit=CELERY_TASK_TIME_LIMIT,
 )
 def send_voice_call(self, notification_id: str, trace_id: str):
-    return _send_notification_channel_impl(notification_id, trace_id, NotificationChannel.VOICE)
+    return _send_notification_channel_impl(
+        notification_id, trace_id, NotificationChannel.VOICE
+    )
 
 
 def _send_voice_call_impl(notification_id: str, trace_id: str):
-    return _send_notification_channel_impl(notification_id, trace_id, NotificationChannel.VOICE)
+    return _send_notification_channel_impl(
+        notification_id, trace_id, NotificationChannel.VOICE
+    )
 
 
 @celery_app.task(
@@ -816,11 +891,15 @@ def _send_voice_call_impl(notification_id: str, trace_id: str):
     time_limit=CELERY_TASK_TIME_LIMIT,
 )
 def send_telegram_message(self, notification_id: str, trace_id: str):
-    return _send_notification_channel_impl(notification_id, trace_id, NotificationChannel.TELEGRAM)
+    return _send_notification_channel_impl(
+        notification_id, trace_id, NotificationChannel.TELEGRAM
+    )
 
 
 def _send_telegram_message_impl(notification_id: str, trace_id: str):
-    return _send_notification_channel_impl(notification_id, trace_id, NotificationChannel.TELEGRAM)
+    return _send_notification_channel_impl(
+        notification_id, trace_id, NotificationChannel.TELEGRAM
+    )
 
 
 @celery_app.task(
@@ -835,11 +914,15 @@ def _send_telegram_message_impl(notification_id: str, trace_id: str):
     time_limit=CELERY_TASK_TIME_LIMIT,
 )
 def send_email_message(self, notification_id: str, trace_id: str):
-    return _send_notification_channel_impl(notification_id, trace_id, NotificationChannel.EMAIL)
+    return _send_notification_channel_impl(
+        notification_id, trace_id, NotificationChannel.EMAIL
+    )
 
 
 def _send_email_message_impl(notification_id: str, trace_id: str):
-    return _send_notification_channel_impl(notification_id, trace_id, NotificationChannel.EMAIL)
+    return _send_notification_channel_impl(
+        notification_id, trace_id, NotificationChannel.EMAIL
+    )
 
 
 @celery_app.task(
@@ -894,9 +977,13 @@ def _handle_escalation_impl(incident_id: str, trace_id: str):
         if not isinstance(policy, dict):
             invalid_field = "policy"
         else:
-            raw_group_id = policy.get("escalation_group_id") or policy.get("escalation_group")
+            raw_group_id = policy.get("escalation_group_id") or policy.get(
+                "escalation_group"
+            )
             raw_channels = policy.get("channels", ["VOICE"])
-            diagnostic["escalation_group_id_type"] = type(raw_group_id).__name__ if raw_group_id is not None else "NoneType"
+            diagnostic["escalation_group_id_type"] = (
+                type(raw_group_id).__name__ if raw_group_id is not None else "NoneType"
+            )
             diagnostic["channels_type"] = type(raw_channels).__name__
 
             if isinstance(raw_group_id, uuid.UUID):
@@ -941,7 +1028,11 @@ def _handle_escalation_impl(incident_id: str, trace_id: str):
             db.commit()
             return True
 
-        members = db.query(GroupMember).filter(GroupMember.group_id == escalation_group_id).all()
+        members = (
+            db.query(GroupMember)
+            .filter(GroupMember.group_id == escalation_group_id)
+            .all()
+        )
         for member in members:
             for channel in fallback_channels:
                 try:
@@ -1010,10 +1101,14 @@ def stale_incident_sweeper():
             if swept:
                 db.commit()
             result = {"swept": swept, "cutoff": cutoff.isoformat()}
-            _record_periodic_task_heartbeat("stale_incident_sweeper", started_monotonic, "ok")
+            _record_periodic_task_heartbeat(
+                "stale_incident_sweeper", started_monotonic, "ok"
+            )
             return result
         except Exception:
-            _record_periodic_task_heartbeat("stale_incident_sweeper", started_monotonic, "error")
+            _record_periodic_task_heartbeat(
+                "stale_incident_sweeper", started_monotonic, "error"
+            )
             raise
     finally:
         db.close()
@@ -1022,7 +1117,6 @@ def stale_incident_sweeper():
 def _replay_entry(entry: dict) -> bool:
     task_name = entry.get("task_name")
     args = entry.get("args", [])
-    kwargs = entry.get("kwargs", {})
 
     if task_name == "voice_worker":
         result = _send_voice_call_impl(args[0], args[1])
@@ -1153,10 +1247,14 @@ def queue_metrics_snapshot():
     started_monotonic = time.monotonic()
     try:
         result = _snapshot_queue_backlog()
-        _record_periodic_task_heartbeat("queue_metrics_snapshot", started_monotonic, "ok")
+        _record_periodic_task_heartbeat(
+            "queue_metrics_snapshot", started_monotonic, "ok"
+        )
         return result
     except Exception:
-        _record_periodic_task_heartbeat("queue_metrics_snapshot", started_monotonic, "error")
+        _record_periodic_task_heartbeat(
+            "queue_metrics_snapshot", started_monotonic, "error"
+        )
         raise
 
 
@@ -1181,6 +1279,3 @@ def prune_dlq(max_items: int | None = None):
     except Exception:
         _record_periodic_task_heartbeat("prune_dlq", started_monotonic, "error")
         raise
-
-
-

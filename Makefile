@@ -1,6 +1,6 @@
 PY=.venv/Scripts/python.exe
 
-.PHONY: install lock test lint ci precommit-install
+.PHONY: install lock test lint format-check ci precommit-install
 
 install:
 	$(PY) -m pip install -r requirements.txt
@@ -14,6 +14,8 @@ test:
 
 lint:
 	$(PY) -m ruff check .
+
+format-check:
 	$(PY) -m black --check .
 
 ci:

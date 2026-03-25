@@ -18,9 +18,13 @@ tasks:
       - .venv/Scripts/python.exe -m pytest tests -q
 
   lint:
-    desc: Run linters and formatting checks
+    desc: Run linters
     cmds:
       - .venv/Scripts/python.exe -m ruff check .
+
+  format-check:
+    desc: Run formatting check (optional, may require full-repo formatting)
+    cmds:
       - .venv/Scripts/python.exe -m black --check .
 
   ci:
