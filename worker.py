@@ -144,6 +144,53 @@ def _voice_twiml_url(notification_id: str, trace_id: str | None = None) -> str:
     return f"{APP_BASE_URL}/dispatch/voice/twiml/{notification_id}{query}"
 
 
+_SERVICE_NAME_MAP: dict[str, str] = {
+    "oasis-veredas-backend": "Veredas Backend",
+    "oasis-veredas-celery-worker": "Celery Worker Ingest",
+    "oasis-veredas-celery-worker-download": "Celery Worker Download",
+    "oasis-veredas-celery-worker-parser": "Celery Worker Parser",
+    "oasis-veredas-celery-worker-compendio": "Celery Worker Compendio",
+    "oasis-veredas-celery-beat": "Celery Beat",
+    "oasis-veredas-frontend": "Veredas Frontend",
+    "oasis-ariranha-backend": "Ariranha Backend",
+    "oasis-ariranha-frontend": "Ariranha Frontend",
+    "oasis-candeia-backend": "Candeia Backend",
+    "oasis-candeia-frontend": "Candeia Frontend",
+    "oasis-seriema-api": "Seriema API",
+    "oasis-seriema-worker": "Seriema Worker",
+    "oasis-seriema-beat": "Seriema Beat",
+    "oasis-veredas-postgres": "Postgres Veredas",
+    "oasis-ariranha-postgres": "Postgres Ariranha",
+    "oasis-candeia-postgres": "Postgres Candeia",
+    "oasis-veredas-redis": "Redis",
+    "oasis-sargaco": "Sargaço",
+}
+
+_SOURCE_LABEL_MAP: dict[str, str] = {
+    "oasis-radar": "Loki",
+    "veredas-ingest": "Veredas",
+    "sentry": "Sentry",
+    "langfuse": "Langfuse",
+    "test": "Teste",
+}
+
+_SEVERITY_EMOJI_MAP: dict[str, str] = {
+    "FATAL": "🔴",
+    "CRITICAL": "🟠",
+    "ERROR": "🟡",
+    "WARNING": "⚪",
+    "INFO": "ℹ️",
+}
+
+
+def _simplify_service_name(service: str) -> str:
+    return _SERVICE_NAME_MAP.get(service, service)
+
+
+def _source_label(source: str) -> str:
+    return _SOURCE_LABEL_MAP.get(source, source)
+
+
 def _render_notification_template(
     rule: Rule | None,
     incident: Incident,
@@ -154,11 +201,26 @@ def _render_notification_template(
     if isinstance(templates, dict):
         template = templates.get(channel.upper()) or templates.get(channel.lower())
 
+    severity = incident.severity or ""
+    service = _simplify_service_name(incident.service or "")
+    source = _source_label(incident.source or "")
+    emoji = _SEVERITY_EMOJI_MAP.get(severity, "")
+    incident_short = str(incident.id)[:8]
+
+    if not template and channel.upper() == "TELEGRAM":
+        return (
+            f"*Serviço*: {service}\n"
+            f"*Nível*: {emoji} {severity}\n"
+            f"*Objeto*: {incident.title}\n"
+            f"*Fonte*: {source}\n"
+            f"*Incident*: {incident_short}"
+        )
+
     if not template:
         template = "[{severity}] {title} | source={source} | incident={incident_id}"
 
     values = {
-        "severity": incident.severity,
+        "severity": severity,
         "title": incident.title,
         "source": incident.source,
         "message": incident.message or "",
@@ -307,6 +369,7 @@ def _send_telegram_via_bot_api(chat_id: str, text: str) -> str:
         {
             "chat_id": str(chat_id),
             "text": text,
+            "parse_mode": "Markdown",
             "disable_web_page_preview": True,
         }
     ).encode("utf-8")
