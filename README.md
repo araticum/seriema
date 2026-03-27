@@ -223,6 +223,19 @@ Runbook curto:
 - `GET /groups/{group_id}/members`
 - `DELETE /groups/{group_id}/members/{contact_id}`
 
+## Integrações de Webhook
+
+Configure estes endpoints públicos na Seriema:
+
+- Sentry: `POST {APP_BASE_URL}/integrations/sentry/webhook`
+- Langfuse: `POST {APP_BASE_URL}/integrations/langfuse/webhook`
+
+Variáveis adicionais:
+
+- `SENTRY_WEBHOOK_SIGNING_SECRET`
+- `LANGFUSE_WEBHOOK_SECRET`
+- `TELEGRAM_NOTIFICATION_DEDUPE_WINDOW_SECONDS` (fallback de throttle para Telegram quando a regra não definir `dedupe_window_seconds`)
+
 ## Docs Relacionados
 
 - [Runbook Operacional](plans/runbook_ops.md)

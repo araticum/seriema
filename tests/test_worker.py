@@ -1639,6 +1639,89 @@ def test_send_telegram_message_uses_contact_telegram_id(monkeypatch):
         db.close()
 
 
+def test_send_telegram_message_suppresses_duplicates_within_window(monkeypatch):
+    prefix = f"pytest:{uuid.uuid4().hex}"
+    _, redis_client, worker = _fresh_worker(monkeypatch, prefix=prefix, dry_run="true")
+
+    _clear_prefix(redis_client.redis_conn, prefix)
+    monkeypatch.setattr(worker, "TELEGRAM_BOT_TOKEN", "token-123", raising=False)
+    monkeypatch.setattr(
+        worker, "TELEGRAM_NOTIFICATION_DEDUPE_WINDOW_SECONDS", 300, raising=False
+    )
+
+    sent_messages = []
+
+    def _fake_send(chat_id, text):
+        sent_messages.append((chat_id, text))
+        return f"tg-msg-{len(sent_messages)}"
+
+    monkeypatch.setattr(worker, "_send_telegram_via_bot_api", _fake_send, raising=False)
+
+    db = worker.SessionLocal()
+    try:
+        contact = worker.Contact(name="TG Contact", telegram_id="987654321")
+        incident_a = worker.Incident(
+            external_event_id=f"evt-{uuid.uuid4().hex}",
+            source="pytest",
+            severity="CRITICAL",
+            service="veredas-backend",
+            title="database missing",
+            message='database "metabase" does not exist',
+            status=worker.IncidentStatus.OPEN,
+        )
+        incident_b = worker.Incident(
+            external_event_id=f"evt-{uuid.uuid4().hex}",
+            source="pytest",
+            severity="CRITICAL",
+            service="veredas-backend",
+            title="database missing",
+            message='database "metabase" does not exist',
+            status=worker.IncidentStatus.OPEN,
+        )
+        db.add(contact)
+        db.add(incident_a)
+        db.add(incident_b)
+        db.commit()
+        db.refresh(contact)
+        db.refresh(incident_a)
+        db.refresh(incident_b)
+
+        notification_a = worker.Notification(
+            incident_id=incident_a.id,
+            contact_id=contact.id,
+            channel=worker.NotificationChannel.TELEGRAM,
+        )
+        notification_b = worker.Notification(
+            incident_id=incident_b.id,
+            contact_id=contact.id,
+            channel=worker.NotificationChannel.TELEGRAM,
+        )
+        db.add(notification_a)
+        db.add(notification_b)
+        db.commit()
+        db.refresh(notification_a)
+        db.refresh(notification_b)
+
+        result_a = worker._send_telegram_message_impl(
+            str(notification_a.id), "trace-tg-1"
+        )
+        result_b = worker._send_telegram_message_impl(
+            str(notification_b.id), "trace-tg-2"
+        )
+
+        assert result_a["status"] == "sent"
+        assert result_b["status"] == "suppressed_duplicate"
+        assert len(sent_messages) == 1
+
+        db.refresh(notification_a)
+        db.refresh(notification_b)
+        assert notification_a.status == worker.NotificationStatus.SENT
+        assert notification_b.status == worker.NotificationStatus.DELIVERED
+        assert notification_b.external_provider_id == "suppressed:dedupe_window"
+    finally:
+        db.close()
+
+
 def test_send_telegram_message_falls_back_to_logs_group(monkeypatch):
     prefix = f"pytest:{uuid.uuid4().hex}"
     _, redis_client, worker = _fresh_worker(monkeypatch, prefix=prefix, dry_run="true")

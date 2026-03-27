@@ -54,6 +54,7 @@ from .config import (
     SIGNALWIRE_FROM_NUMBER,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_LOGS_CHAT_ID,
+    TELEGRAM_NOTIFICATION_DEDUPE_WINDOW_SECONDS,
     RESEND_API_KEY,
     RESEND_FROM_EMAIL,
     RESEND_TO_EMAIL,
@@ -382,6 +383,73 @@ def _telegram_target_chat_id(contact: Contact | None) -> str:
     if contact and contact.telegram_id:
         return str(contact.telegram_id)
     return str(TELEGRAM_LOGS_CHAT_ID)
+
+
+def _telegram_notification_dedupe_window(rule: Rule | None) -> int:
+    if rule and rule.dedupe_window_seconds is not None:
+        return max(1, int(rule.dedupe_window_seconds))
+    return max(1, int(TELEGRAM_NOTIFICATION_DEDUPE_WINDOW_SECONDS))
+
+
+def _telegram_notification_dedupe_key(
+    incident: Incident,
+    chat_id: str,
+    message_preview: str | None,
+) -> str:
+    title = str(getattr(incident, "title", "") or "").strip()
+    service = str(getattr(incident, "service", "") or "").strip()
+    source = str(getattr(incident, "source", "") or "").strip()
+    preview = str(message_preview or "").strip()
+    basis = f"telegram|{chat_id}|{source}|{service}|{title}|{preview}"
+    digest = uuid.uuid5(uuid.NAMESPACE_URL, basis)
+    return prefixed_redis_key(f"telegram:dedupe:{digest}")
+
+
+def _mark_notification_suppressed(
+    db: Session,
+    notification_id: str,
+    trace_id: str,
+    provider_channel: str,
+    *,
+    reason: str,
+    dedupe_key: str,
+    dedupe_window_seconds: int,
+    message_preview: str | None = None,
+    runbook_url: str | None = None,
+) -> bool:
+    notification = (
+        db.query(Notification)
+        .filter(Notification.id == notification_id)
+        .with_for_update()
+        .first()
+    )
+    if not notification:
+        raise LookupError(f"notification not found: {notification_id}")
+    if _notification_is_terminal(notification):
+        return False
+
+    notification.status = NotificationStatus.DELIVERED
+    notification.external_provider_id = f"suppressed:{reason}"
+    db.add(
+        AuditLog(
+            trace_id=trace_id,
+            incident_id=notification.incident_id,
+            action=AuditAction.NOTIFICATION_SENT,
+            details_json={
+                "channel": provider_channel,
+                "notification_id": notification_id,
+                "trace_id": trace_id,
+                "suppressed": True,
+                "suppression_reason": reason,
+                "dedupe_key": dedupe_key,
+                "dedupe_window_seconds": dedupe_window_seconds,
+                "message_preview": message_preview,
+                "runbook_url": runbook_url,
+            },
+        )
+    )
+    db.commit()
+    return True
 
 
 def _send_telegram_via_bot_api(chat_id: str, text: str) -> str:
@@ -1212,8 +1280,40 @@ def _send_notification_channel_impl(
                         "trace_id": trace_id,
                         "error": error_message,
                     }
+                chat_id = _telegram_target_chat_id(contact)
+                dedupe_window_seconds = _telegram_notification_dedupe_window(rule)
+                dedupe_key = _telegram_notification_dedupe_key(
+                    incident,
+                    chat_id,
+                    message_preview,
+                )
+                if not redis_conn.set(
+                    dedupe_key,
+                    str(notification.id),
+                    nx=True,
+                    ex=dedupe_window_seconds,
+                ):
+                    _mark_notification_suppressed(
+                        db,
+                        notification_id,
+                        trace_id,
+                        channel_name,
+                        reason="dedupe_window",
+                        dedupe_key=dedupe_key,
+                        dedupe_window_seconds=dedupe_window_seconds,
+                        message_preview=message_preview,
+                        runbook_url=runbook_url,
+                    )
+                    return {
+                        "status": "suppressed_duplicate",
+                        "channel": channel_name,
+                        "notification_id": notification_id,
+                        "trace_id": trace_id,
+                        "dedupe_key": dedupe_key,
+                        "dedupe_window_seconds": dedupe_window_seconds,
+                    }
                 provider_id = _send_telegram_via_bot_api(
-                    _telegram_target_chat_id(contact),
+                    chat_id,
                     message_preview or "Alerta sem conteúdo.",
                 )
             elif channel_name == "EMAIL":
