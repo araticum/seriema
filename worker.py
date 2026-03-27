@@ -134,6 +134,19 @@ def _notification_channel_value(channel: NotificationChannel | str) -> str:
     return channel.value if isinstance(channel, NotificationChannel) else str(channel)
 
 
+def _incident_severity_value(incident: Incident) -> str:
+    return str(getattr(incident, "severity", "") or "").strip().upper()
+
+
+def _channel_enabled_for_incident(
+    incident: Incident, channel: NotificationChannel | str
+) -> bool:
+    channel_value = _notification_channel_value(channel).upper()
+    if channel_value == NotificationChannel.TELEGRAM.value:
+        return _incident_severity_value(incident) != "INFO"
+    return True
+
+
 def _voice_twiml_url(notification_id: str, trace_id: str | None = None) -> str:
     mode = (VOICE_TWIML_MODE or "dynamic").strip().lower()
     query = f"?trace_id={trace_id}" if trace_id else ""
@@ -1326,6 +1339,9 @@ def dispatch_incident(incident_id: str, incoming_trace_id: str):
                 except KeyError:
                     continue
 
+                if not _channel_enabled_for_incident(incident, notification_channel):
+                    continue
+
                 notif, created = _get_or_create_notification(
                     db,
                     str(incident.id),
@@ -1582,6 +1598,9 @@ def _handle_escalation_impl(incident_id: str, trace_id: str):
                 try:
                     notification_channel = NotificationChannel[str(channel).upper()]
                 except KeyError:
+                    continue
+
+                if not _channel_enabled_for_incident(incident, notification_channel):
                     continue
 
                 notif, _ = _get_or_create_notification(
