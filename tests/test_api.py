@@ -833,6 +833,76 @@ def test_ingest_event_duplicate_records_duplicate_audit(client, monkeypatch):
         main.app.dependency_overrides.pop(main.get_db, None)
 
 
+def test_sentry_webhook_creates_incident_via_ingest(client, monkeypatch):
+    captured = {}
+
+    def _fake_ingest_event(event, db):
+        captured["event"] = event
+        return schemas.EventIngestResponse(
+            status="accepted",
+            incident_id=uuid.uuid4(),
+            matched_rule=True,
+            trace_id="trace-sentry",
+        )
+
+    monkeypatch.setattr(main, "ingest_event", _fake_ingest_event)
+
+    response = client.post(
+        "/integrations/sentry/webhook",
+        json={
+            "event": "issue",
+            "level": "error",
+            "culprit": 'database "metabase" does not exist',
+            "project": "veredas-backend",
+            "url": "https://sentry.example.com/issues/1",
+            "issue_id": "123",
+        },
+    )
+
+    assert response.status_code == 200
+    event = captured["event"]
+    assert event.source == "sentry"
+    assert event.severity == "ERROR"
+    assert event.service == "veredas-backend"
+    assert event.external_event_id == "sentry:123:issue"
+    assert 'database "metabase" does not exist' in (event.message or "")
+
+
+def test_langfuse_webhook_creates_incident_via_ingest(client, monkeypatch):
+    captured = {}
+
+    def _fake_ingest_event(event, db):
+        captured["event"] = event
+        return schemas.EventIngestResponse(
+            status="accepted",
+            incident_id=uuid.uuid4(),
+            matched_rule=True,
+            trace_id="trace-langfuse",
+        )
+
+    monkeypatch.setattr(main, "ingest_event", _fake_ingest_event)
+
+    response = client.post(
+        "/integrations/langfuse/webhook",
+        json={
+            "event": "score.created",
+            "project": "langfuse-prod",
+            "trace_id": "trace-123",
+            "score_name": "hallucination",
+            "score": 0.2,
+            "message": "Low score detected",
+        },
+    )
+
+    assert response.status_code == 200
+    event = captured["event"]
+    assert event.source == "langfuse"
+    assert event.severity == "WARN"
+    assert event.service == "langfuse-prod"
+    assert event.external_event_id == "langfuse:trace-123:score.created"
+    assert "score=0.200" in (event.message or "")
+
+
 def test_metrics_sla_valid(client):
     fake_session = FakeSession(
         queries=[

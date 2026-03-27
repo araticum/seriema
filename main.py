@@ -38,8 +38,10 @@ from .config import (
     SIGNALWIRE_PROJECT_ID,
     SIGNALWIRE_SPACE_URL,
     SENTRY_DSN,
+    SENTRY_WEBHOOK_SIGNING_SECRET,
     LANGFUSE_PUBLIC_KEY,
     LANGFUSE_SECRET_KEY,
+    LANGFUSE_WEBHOOK_SECRET,
     TWILIO_ACCOUNT_SID,
     TWILIO_AUTH_TOKEN,
     TWILIO_FROM_NUMBER,
@@ -526,6 +528,161 @@ def _verify_voice_webhook_signature(
     return True, "ok"
 
 
+def _verify_json_webhook_signature(
+    body: bytes,
+    signature_header: str | None,
+    secret: str | None,
+    *,
+    header_prefix: str | None = None,
+) -> tuple[bool, str]:
+    if not secret:
+        return True, "skipped"
+    if not signature_header:
+        return False, "missing_signature"
+
+    received_signature = signature_header.strip()
+    if header_prefix and received_signature.startswith(f"{header_prefix}="):
+        received_signature = received_signature.split("=", 1)[1]
+
+    expected_signature = hmac.new(
+        secret.encode("utf-8"),
+        body,
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(expected_signature, received_signature):
+        return False, "invalid_signature"
+    return True, "ok"
+
+
+def _coerce_payload_dict(payload: object) -> dict[str, object]:
+    if isinstance(payload, dict):
+        return dict(payload)
+    return {}
+
+
+def _string_or_empty(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, sort_keys=True, ensure_ascii=False)
+    return str(value)
+
+
+def _normalize_severity(level: object, default: str = "WARN") -> str:
+    normalized = str(level or "").strip().lower()
+    if normalized in {"fatal", "panic", "emergency", "alert"}:
+        return "FATAL"
+    if normalized in {"critical", "crit", "regression"}:
+        return "CRITICAL"
+    if normalized in {"error", "err", "failed", "failure"}:
+        return "ERROR"
+    if normalized in {"warn", "warning", "low"}:
+        return "WARN"
+    if normalized in {"info", "notice", "debug", "trace"}:
+        return "INFO"
+    return default
+
+
+def _build_sentry_event(payload: dict[str, object]) -> schemas.EventIncoming:
+    event_name = _string_or_empty(
+        payload.get("action") or payload.get("event") or "issue"
+    )
+    level = payload.get("level") or payload.get("severity") or event_name
+    project = _string_or_empty(
+        payload.get("project") or payload.get("project_name") or "sentry"
+    )
+    culprit = _string_or_empty(
+        payload.get("culprit")
+        or payload.get("title")
+        or payload.get("message")
+        or "Sentry event"
+    )
+    issue_id = _string_or_empty(
+        payload.get("issue_id") or payload.get("id") or payload.get("event_id")
+    )
+    normalized_issue_id = (
+        issue_id
+        or hashlib.sha256(
+            json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:16]
+    )
+    issue_url = _string_or_empty(payload.get("url") or payload.get("web_url"))
+    title = f"Sentry {event_name}: {project}"
+    message_parts = [culprit]
+    if issue_url:
+        message_parts.append(issue_url)
+    return schemas.EventIncoming(
+        external_event_id=f"sentry:{normalized_issue_id}:{event_name.lower().replace(' ', '-')}",
+        source="sentry",
+        severity=_normalize_severity(level, default="ERROR"),
+        service=project,
+        title=title[:255],
+        message="\n".join(part for part in message_parts if part)[:5000],
+        payload_json=payload,
+        schedule_at=None,
+        dedupe_key=hashlib.sha256(
+            f"sentry|{project}|{event_name}|{culprit}".encode("utf-8")
+        ).hexdigest(),
+    )
+
+
+def _build_langfuse_event(payload: dict[str, object]) -> schemas.EventIncoming:
+    event_name = _string_or_empty(
+        payload.get("event") or payload.get("type") or "event"
+    )
+    project = _string_or_empty(
+        payload.get("project") or payload.get("project_id") or "langfuse"
+    )
+    trace_id = _string_or_empty(
+        payload.get("trace_id") or payload.get("id") or payload.get("object_id")
+    )
+    if not trace_id:
+        trace_id = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:16]
+
+    level = payload.get("level") or payload.get("severity")
+    score_value = payload.get("score")
+    score_name = _string_or_empty(payload.get("score_name") or payload.get("name"))
+    trace_name = _string_or_empty(
+        payload.get("trace_name") or payload.get("observation_name")
+    )
+    message = _string_or_empty(
+        payload.get("message") or payload.get("status_message") or payload.get("error")
+    )
+
+    if level is None and isinstance(score_value, (int, float)):
+        level = "warn" if float(score_value) < 0.5 else "info"
+    if level is None and event_name.lower() in {"trace.error", "trace_failed", "error"}:
+        level = "error"
+
+    title_bits = ["Langfuse", event_name]
+    if score_name:
+        title_bits.append(score_name)
+    elif trace_name:
+        title_bits.append(trace_name)
+    title = " - ".join(bit for bit in title_bits if bit)
+
+    summary_parts = [part for part in [message, f"trace_id={trace_id}"] if part]
+    if isinstance(score_value, (int, float)):
+        summary_parts.append(f"score={float(score_value):.3f}")
+
+    dedupe_basis = (
+        f"langfuse|{project}|{event_name}|{trace_name}|{score_name}|{message}"
+    )
+    return schemas.EventIncoming(
+        external_event_id=f"langfuse:{trace_id}:{event_name.lower().replace(' ', '-')}",
+        source="langfuse",
+        severity=_normalize_severity(level, default="WARN"),
+        service=project,
+        title=title[:255],
+        message="\n".join(summary_parts)[:5000],
+        payload_json=payload,
+        schedule_at=None,
+        dedupe_key=hashlib.sha256(dedupe_basis.encode("utf-8")).hexdigest(),
+    )
+
+
 def _fetch_oasis_radar_entries(
     query: str,
     lookback_seconds: int,
@@ -927,6 +1084,45 @@ def ingest_event(event: schemas.EventIncoming, db: Session = Depends(get_db)):
         matched_rule=bool(matched_rule),
         trace_id=audit_trace_id,
     )
+
+
+@app.post("/integrations/sentry/webhook", response_model=schemas.EventIngestResponse)
+async def sentry_webhook(request: Request, db: Session = Depends(get_db)):
+    raw_body = await request.body()
+    signature_ok, _signature_reason = _verify_json_webhook_signature(
+        raw_body,
+        request.headers.get("Sentry-Hook-Signature")
+        or request.headers.get("X-Sentry-Signature"),
+        SENTRY_WEBHOOK_SIGNING_SECRET,
+        header_prefix="sha256",
+    )
+    if not signature_ok:
+        raise HTTPException(status_code=401, detail="Invalid Sentry webhook signature")
+
+    payload = _coerce_payload_dict(await request.json())
+    event = _build_sentry_event(payload)
+    return ingest_event(event=event, db=db)
+
+
+@app.post("/integrations/langfuse/webhook", response_model=schemas.EventIngestResponse)
+async def langfuse_webhook(request: Request, db: Session = Depends(get_db)):
+    raw_body = await request.body()
+    signature_ok, _signature_reason = _verify_json_webhook_signature(
+        raw_body,
+        request.headers.get("X-Langfuse-Signature")
+        or request.headers.get("Langfuse-Signature")
+        or request.headers.get("X-Webhook-Signature"),
+        LANGFUSE_WEBHOOK_SECRET,
+        header_prefix="sha256",
+    )
+    if not signature_ok:
+        raise HTTPException(
+            status_code=401, detail="Invalid Langfuse webhook signature"
+        )
+
+    payload = _coerce_payload_dict(await request.json())
+    event = _build_langfuse_event(payload)
+    return ingest_event(event=event, db=db)
 
 
 @app.post("/integrations/oasis-radar/pull")
