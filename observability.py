@@ -56,28 +56,36 @@ def _send_langfuse_event(
         return
 
     try:
-        if hasattr(_langfuse_client, "create_event"):
-            _langfuse_client.create_event(
-                name=name,
-                metadata=payload,
-                level=level,
-                trace_id=trace_id,
-            )
-        elif hasattr(_langfuse_client, "event"):
-            _langfuse_client.event(
-                name=name,
-                metadata=payload,
-                level=level,
-                trace_id=trace_id,
-            )
-        elif hasattr(_langfuse_client, "trace"):
-            trace = _langfuse_client.trace(
-                id=trace_id,
+        langfuse_level = level.upper()
+
+        if trace_id:
+            with _langfuse_client.start_as_current_observation(
                 name="seriema.event",
-                metadata={"source": "seriema"},
-            )
-            if hasattr(trace, "event"):
-                trace.event(name=name, metadata=payload)
+                as_type="span",
+                trace_context={"trace_id": trace_id},
+                metadata={"source": "seriema", "event_name": name},
+                level=langfuse_level,
+            ) as trace_span:
+                trace_span.start_observation(
+                    name=name,
+                    as_type="event",
+                    metadata=payload,
+                    level=langfuse_level,
+                )
+        else:
+            with _langfuse_client.start_as_current_observation(
+                name="seriema.event",
+                as_type="span",
+                metadata={"source": "seriema", "event_name": name},
+                level=langfuse_level,
+            ) as trace_span:
+                trace_span.start_observation(
+                    name=name,
+                    as_type="event",
+                    metadata=payload,
+                    level=langfuse_level,
+                )
+
         if hasattr(_langfuse_client, "flush"):
             _langfuse_client.flush()
     except Exception as exc:

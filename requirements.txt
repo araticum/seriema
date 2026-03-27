@@ -9,7 +9,7 @@ pydantic-settings
 alembic
 python-multipart
 sentry-sdk
-langfuse
+langfuse==4.0.1
 prometheus-fastapi-instrumentator
 gunicorn
 gevent
