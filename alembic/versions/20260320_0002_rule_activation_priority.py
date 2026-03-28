@@ -35,8 +35,6 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute(
-        sa.text(f'ALTER TABLE "{DB_SCHEMA}".rules ' "DROP COLUMN IF EXISTS priority")
+        sa.text(f'ALTER TABLE "{DB_SCHEMA}".rules DROP COLUMN IF EXISTS priority')
     )
-    op.execute(
-        sa.text(f'ALTER TABLE "{DB_SCHEMA}".rules ' "DROP COLUMN IF EXISTS active")
-    )
+    op.execute(sa.text(f'ALTER TABLE "{DB_SCHEMA}".rules DROP COLUMN IF EXISTS active'))
