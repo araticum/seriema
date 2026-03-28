@@ -80,13 +80,13 @@ SERIEMA_INCIDENT_STALE_SWEEP_INTERVAL_SECONDS=300
 ## Executando a API
 
 ```bash
-py -3 -m uvicorn Seriema.main:app --reload
+py -3 -m uvicorn seriema.main:app --reload
 ```
 
 ## Executando o Worker
 
 ```bash
-celery -A Seriema.worker.celery_app worker -l info -B \
+celery -A seriema.worker.celery_app worker -l info -B \
   -Q queue:seriema:dispatch,queue:seriema:voice,queue:seriema:telegram,queue:seriema:email,queue:seriema:dlq
 ```
 
@@ -223,17 +223,17 @@ Runbook curto:
 - `GET /groups/{group_id}/members`
 - `DELETE /groups/{group_id}/members/{contact_id}`
 
-## Integrações de Webhook
+## Observability adicional
 
-Configure estes endpoints públicos na Seriema:
+A Seriema não precisa receber webhooks públicos de Sentry ou Langfuse.
+A arquitetura correta é:
 
-- Sentry: `POST {APP_BASE_URL}/integrations/sentry/webhook`
-- Langfuse: `POST {APP_BASE_URL}/integrations/langfuse/webhook`
+- Sentry -> Loki
+- Langfuse -> Loki
+- Seriema -> pull no Loki via `oasis_radar_pull_worker`
 
-Variáveis adicionais:
+Variável relacionada:
 
-- `SENTRY_WEBHOOK_SIGNING_SECRET`
-- `LANGFUSE_WEBHOOK_SECRET`
 - `TELEGRAM_NOTIFICATION_DEDUPE_WINDOW_SECONDS` (fallback de throttle para Telegram quando a regra não definir `dedupe_window_seconds`)
 
 ## Docs Relacionados
