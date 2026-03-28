@@ -52,6 +52,8 @@ def _normalize_service(service: str, labels: dict[str, Any]) -> str:
         if "api" in joined:
             return "seriema-api"
         return "seriema"
+    if "loki" in joined:
+        return "loki"
     if any(
         token in joined
         for token in (
@@ -266,6 +268,93 @@ def _classify_seriema(service: str, line: str, labels: dict[str, Any]) -> Severi
     return _default_text_classification(f"Seriema {label_role} log", line)
 
 
+def _classify_loki(line: str) -> SeverityTitle:
+    lower = line.lower()
+
+    if (
+        "at least one label pair" in lower
+        or "error processing query" in lower
+        or (
+            "promtail" in lower
+            and any(token in lower for token in ("batch", "invalid", "label pair"))
+        )
+    ):
+        return "INFO", "Loki: batch processing noise (ignore)"
+
+    return _default_text_classification("Loki log", line)
+
+
+def _split_prefixed_log_line(line: str) -> tuple[str | None, str]:
+    match = re.match(r"^(INFO|WARNING|WARN|ERROR|CRITICAL|DEBUG):\s*(.*)$", line)
+    if not match:
+        return None, line
+    return match.group(1), match.group(2)
+
+
+def _extract_embedded_json(line: str) -> dict[str, Any] | None:
+    start = line.find("{")
+    if start < 0:
+        return None
+    try:
+        parsed = json.loads(line[start:])
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _classify_veredas(line: str) -> SeverityTitle:
+    prefix, remainder = _split_prefixed_log_line(line)
+    if prefix == "INFO":
+        return "INFO", "Veredas info log"
+    if prefix in {"WARNING", "WARN"}:
+        return "WARN", "Veredas warning log"
+
+    parsed = _extract_embedded_json(remainder if prefix else line)
+    message = remainder if prefix else line
+    lower = message.lower()
+
+    if parsed is not None:
+        json_severity = _severity_from_json(parsed)
+        if json_severity == "INFO":
+            return "INFO", "Veredas info log"
+        if json_severity == "WARN":
+            return "WARN", "Veredas warning log"
+        message = str(
+            parsed.get("message")
+            or parsed.get("msg")
+            or parsed.get("event")
+            or parsed.get("detail")
+            or remainder
+            or line
+        )
+        lower = message.lower()
+
+    if "database" in lower and (
+        "does not exist" in lower or "connection refused" in lower
+    ):
+        return "CRITICAL", "Veredas: banco indisponível"
+    if "celery" in lower and "connection refused" in lower:
+        return "CRITICAL", "Veredas: Redis/broker indisponível"
+    if "pncp" in lower and ("timeout" in lower or "failed" in lower):
+        return "ERROR", "Veredas: falha ingest PNCP"
+    if "parser" in lower and "failed" in lower:
+        return "ERROR", "Veredas: falha no parser de documentos"
+    if "worker" in lower and ("unregistered" in lower or "not found" in lower):
+        return "ERROR", "Veredas: Celery task não registrada"
+
+    if prefix == "CRITICAL":
+        return "CRITICAL", _title_from_text("Veredas log", remainder or line)
+    if prefix == "ERROR":
+        return "ERROR", _title_from_text("Veredas log", remainder or line)
+
+    if parsed is not None:
+        json_severity = _severity_from_json(parsed)
+        if json_severity:
+            return json_severity, _title_from_text("Veredas log", message)
+
+    return _default_text_classification("Veredas log", remainder if prefix else line)
+
+
 def _default_text_classification(prefix: str, line: str) -> SeverityTitle:
     lower = line.lower()
     if re.search(r"\b(panic|fatal)\b", lower):
@@ -312,8 +401,12 @@ def classify_log_line(
         return _classify_postgres(line)
     if normalized_service == "redis":
         return _classify_redis(line)
+    if normalized_service == "loki":
+        return _classify_loki(line)
     if normalized_service in {"sargaco"}:
         return _classify_sargaco(line)
+    if normalized_service == "veredas":
+        return _classify_veredas(line)
     if normalized_service.startswith("celery"):
         return _classify_celery(normalized_service, line)
     if normalized_service.startswith("seriema"):

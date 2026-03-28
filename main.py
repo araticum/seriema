@@ -896,6 +896,25 @@ def health_integrations():
 def ingest_event(event: schemas.EventIncoming, db: Session = Depends(get_db)):
     audit_trace_id = str(uuid.uuid4())
 
+    if str(event.severity).upper() == "INFO":
+        notify_event(
+            "seriema.event.ignored_info",
+            {
+                "trace_id": audit_trace_id,
+                "source": event.source,
+                "service": event.service,
+                "title": event.title,
+            },
+            trace_id=audit_trace_id,
+        )
+        return schemas.EventIngestResponse(
+            status="ignored",
+            reason="info_severity",
+            incident_id=None,
+            matched_rule=False,
+            trace_id=audit_trace_id,
+        )
+
     event_dict = event.model_dump()
     active_rules = (
         db.query(models.Rule)
