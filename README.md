@@ -101,6 +101,14 @@ py -3 -m alembic -c alembic.ini revision --autogenerate -m "descriptive message"
 
 ## Testes
 
+Runbook local padronizado: [`docs/testing-local.md`](docs/testing-local.md)
+
+```bash
+./scripts/test-local.sh
+```
+
+Equivalente manual:
+
 ```bash
 py -3 -m pytest tests -q
 ```
