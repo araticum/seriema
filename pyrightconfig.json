@@ -1,0 +1,26 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "standard",
+  "include": [
+    "classifier.py",
+    "config.py",
+    "database.py",
+    "models.py",
+    "redis_client.py",
+    "schemas.py"
+  ],
+  "exclude": [
+    "alembic",
+    "plans",
+    "tests",
+    ".venv",
+    "**/__pycache__"
+  ],
+  "ignore": [
+    "main.py",
+    "observability.py",
+    "worker.py"
+  ]
+}

@@ -1,6 +1,11 @@
-PY=.venv/Scripts/python.exe
+PY ?= .venv/bin/python
+WIN_PY ?= .venv/Scripts/python.exe
 
-.PHONY: install lock test lint format-check ci precommit-install
+ifeq ($(OS),Windows_NT)
+PY := $(WIN_PY)
+endif
+
+.PHONY: install lock test lint typecheck format-check ci precommit-install
 
 install:
 	$(PY) -m pip install -r requirements.txt
@@ -15,8 +20,11 @@ test:
 lint:
 	$(PY) -m ruff check .
 
+typecheck:
+	$(PY) -m pyright .
+
 format-check:
-	$(PY) -m black --check .
+	$(PY) -m ruff format --check .
 
 ci:
 	$(PY) -m compileall alembic config.py database.py engine.py main.py models.py redis_client.py schemas.py worker.py tests

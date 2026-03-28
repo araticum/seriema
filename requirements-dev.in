@@ -3,6 +3,7 @@ pytest
 pytest-cov
 httpx
 ruff
+pyright
 black
 mypy
 pre-commit

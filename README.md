@@ -103,9 +103,23 @@ py -3 -m alembic -c alembic.ini revision --autogenerate -m "descriptive message"
 
 Runbook local padronizado: [`docs/testing-local.md`](docs/testing-local.md)
 
+Antes de testar em clone local/descartável (`_local/seriema`), mantenha o ambiente sincronizado com o remoto:
+
+```bash
+git fetch origin
+git pull --ff-only origin main
+rm -rf .venv
+python3 -m venv .venv
+./.venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+```
+
+Depois rode:
+
 ```bash
 ./scripts/test-local.sh
 ```
+
+O `pyright` desse fluxo está configurado com escopo pragmático via `pyrightconfig.json`: ele valida primeiro os módulos-base do runtime que já estão tipáveis (`classifier.py`, `config.py`, `database.py`, `models.py`, `redis_client.py`, `schemas.py`) e deixa `main.py`/`worker.py`/`observability.py`/migrações/testes fora do gate até o backlog real ser tratado em etapas.
 
 Equivalente manual:
 

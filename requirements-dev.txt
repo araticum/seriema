@@ -94,11 +94,12 @@ mypy-extensions==1.1.0
     #   mypy
 nodeenv==1.10.0
     # via pre-commit
-packaging==26.0
+packaging==25.0
     # via
     #   black
     #   build
     #   kombu
+    #   langfuse
     #   pytest
     #   wheel
 pathspec==1.0.4
@@ -155,6 +156,8 @@ pytokens==0.4.1
     # via black
 pyyaml==6.0.3
     # via pre-commit
+pyright==1.1.408
+    # via -r requirements-dev.in
 redis==7.4.0
     # via -r requirements.txt
 ruff==0.15.7

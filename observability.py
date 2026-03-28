@@ -1,5 +1,5 @@
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from .config import (
     LANGFUSE_HOST,
@@ -9,6 +9,8 @@ from .config import (
     SENTRY_ENVIRONMENT,
     SENTRY_RELEASE,
 )
+
+LogLevel = Literal["debug", "info", "warning", "error", "critical"]
 
 logger = logging.getLogger("seriema.observability")
 
@@ -56,7 +58,7 @@ def _normalize_langfuse_trace_id(trace_id: str | None) -> str | None:
 def _send_langfuse_event(
     name: str,
     payload: dict[str, Any],
-    level: str,
+    level: LogLevel,
     trace_id: str | None = None,
 ) -> None:
     if _langfuse_client is None:
@@ -103,7 +105,7 @@ def _send_langfuse_event(
 def notify_event(
     name: str,
     payload: dict[str, Any],
-    level: str = "info",
+    level: LogLevel = "info",
     trace_id: str | None = None,
 ) -> None:
     if _sentry_sdk is not None:
